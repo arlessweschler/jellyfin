@@ -3,8 +3,6 @@
 #pragma warning disable CS1591
 
 using System;
-using System.Globalization;
-using System.Text.Json.Serialization;
 
 namespace MediaBrowser.Controller.Entities
 {
@@ -12,17 +10,21 @@ namespace MediaBrowser.Controller.Entities
     {
         public LinkedChild()
         {
-            Id = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture);
         }
 
+        /// <summary>
+        /// Gets or sets the path.
+        /// </summary>
+        [Obsolete("Use ItemId instead")]
         public string Path { get; set; }
 
         public LinkedChildType Type { get; set; }
 
+        /// <summary>
+        /// Gets or sets the library item id.
+        /// </summary>
+        [Obsolete("Use ItemId instead")]
         public string LibraryItemId { get; set; }
-
-        [JsonIgnore]
-        public string Id { get; set; }
 
         /// <summary>
         /// Gets or sets the linked item id.
@@ -31,18 +33,13 @@ namespace MediaBrowser.Controller.Entities
 
         public static LinkedChild Create(BaseItem item)
         {
-            var child = new LinkedChild
+            ArgumentNullException.ThrowIfNull(item);
+
+            return new LinkedChild
             {
-                Path = item.Path,
+                ItemId = item.Id,
                 Type = LinkedChildType.Manual
             };
-
-            if (string.IsNullOrEmpty(child.Path))
-            {
-                child.LibraryItemId = item.Id.ToString("N", CultureInfo.InvariantCulture);
-            }
-
-            return child;
         }
     }
 }

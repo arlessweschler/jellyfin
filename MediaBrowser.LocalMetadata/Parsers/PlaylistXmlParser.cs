@@ -1,6 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Xml;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Extensions;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
 using Microsoft.Extensions.Logging;
@@ -30,12 +33,12 @@ namespace MediaBrowser.LocalMetadata.Parsers
             switch (reader.Name)
             {
                 case "PlaylistMediaType":
-                {
-                    item.PlaylistMediaType = reader.ReadElementContentAsString();
+                    if (Enum.TryParse<MediaType>(reader.ReadNormalizedString(), out var mediaType))
+                    {
+                        item.PlaylistMediaType = mediaType;
+                    }
 
                     break;
-                }
-
                 case "PlaylistItems":
 
                     if (!reader.IsEmptyElement)
@@ -73,31 +76,29 @@ namespace MediaBrowser.LocalMetadata.Parsers
                     switch (reader.Name)
                     {
                         case "PlaylistItem":
-                        {
-                            if (reader.IsEmptyElement)
                             {
-                                reader.Read();
-                                continue;
-                            }
-
-                            using (var subReader = reader.ReadSubtree())
-                            {
-                                var child = GetLinkedChild(subReader);
-
-                                if (child != null)
+                                if (reader.IsEmptyElement)
                                 {
-                                    list.Add(child);
+                                    reader.Read();
+                                    continue;
                                 }
-                            }
 
-                            break;
-                        }
+                                using (var subReader = reader.ReadSubtree())
+                                {
+                                    var child = GetLinkedChild(subReader);
+
+                                    if (child is not null)
+                                    {
+                                        list.Add(child);
+                                    }
+                                }
+
+                                break;
+                            }
 
                         default:
-                        {
                             reader.Skip();
                             break;
-                        }
                     }
                 }
                 else

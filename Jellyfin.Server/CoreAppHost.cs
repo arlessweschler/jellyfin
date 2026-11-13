@@ -1,25 +1,33 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Reflection;
-using Emby.Drawing;
 using Emby.Server.Implementations;
 using Emby.Server.Implementations.Session;
 using Jellyfin.Api.WebSocketListeners;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Drawing;
 using Jellyfin.Drawing.Skia;
-using Jellyfin.Server.Implementations;
+using Jellyfin.LiveTv;
 using Jellyfin.Server.Implementations.Activity;
+using Jellyfin.Server.Implementations.Devices;
 using Jellyfin.Server.Implementations.Events;
+using Jellyfin.Server.Implementations.Extensions;
+using Jellyfin.Server.Implementations.Security;
+using Jellyfin.Server.Implementations.Trickplay;
 using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Controller;
+using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Controller.BaseItemManager;
+using MediaBrowser.Controller.Devices;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Lyrics;
 using MediaBrowser.Controller.Net;
+using MediaBrowser.Controller.Security;
+using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Model.Activity;
-using MediaBrowser.Model.IO;
-using Microsoft.EntityFrameworkCore;
+using MediaBrowser.Providers.Lyric;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -38,64 +46,70 @@ namespace Jellyfin.Server
         /// <param name="loggerFactory">The <see cref="ILoggerFactory" /> to be used by the <see cref="CoreAppHost" />.</param>
         /// <param name="options">The <see cref="StartupOptions" /> to be used by the <see cref="CoreAppHost" />.</param>
         /// <param name="startupConfig">The <see cref="IConfiguration" /> to be used by the <see cref="CoreAppHost" />.</param>
-        /// <param name="fileSystem">The <see cref="IFileSystem" /> to be used by the <see cref="CoreAppHost" />.</param>
-        /// <param name="collection">The <see cref="IServiceCollection"/> to be used by the <see cref="CoreAppHost"/>.</param>
         public CoreAppHost(
             IServerApplicationPaths applicationPaths,
             ILoggerFactory loggerFactory,
             IStartupOptions options,
-            IConfiguration startupConfig,
-            IFileSystem fileSystem,
-            IServiceCollection collection)
+            IConfiguration startupConfig)
             : base(
                 applicationPaths,
                 loggerFactory,
                 options,
-                startupConfig,
-                fileSystem,
-                collection)
+                startupConfig)
         {
         }
 
         /// <inheritdoc/>
-        protected override void RegisterServices()
+        protected override void RegisterServices(IServiceCollection serviceCollection)
         {
             // Register an image encoder
             bool useSkiaEncoder = SkiaEncoder.IsNativeLibAvailable();
             Type imageEncoderType = useSkiaEncoder
                 ? typeof(SkiaEncoder)
                 : typeof(NullImageEncoder);
-            ServiceCollection.AddSingleton(typeof(IImageEncoder), imageEncoderType);
+            serviceCollection.AddSingleton(typeof(IImageEncoder), imageEncoderType);
 
             // Log a warning if the Skia encoder could not be used
             if (!useSkiaEncoder)
             {
-                Logger.LogWarning($"Skia not available. Will fallback to {nameof(NullImageEncoder)}.");
+                Logger.LogWarning("Skia not available. Will fallback to {ImageEncoder}.", nameof(NullImageEncoder));
             }
 
-            ServiceCollection.AddDbContextPool<JellyfinDb>(
-                 options => options.UseSqlite($"Filename={Path.Combine(ApplicationPaths.DataPath, "jellyfin.db")}"));
+            serviceCollection.AddEventServices();
+            serviceCollection.AddSingleton<IBaseItemManager, BaseItemManager>();
+            serviceCollection.AddSingleton<IEventManager, EventManager>();
 
-            ServiceCollection.AddEventServices();
-            ServiceCollection.AddSingleton<IBaseItemManager, BaseItemManager>();
-            ServiceCollection.AddSingleton<IEventManager, EventManager>();
-            ServiceCollection.AddSingleton<JellyfinDbProvider>();
-
-            ServiceCollection.AddSingleton<IActivityManager, ActivityManager>();
-            ServiceCollection.AddSingleton<IUserManager, UserManager>();
-            ServiceCollection.AddSingleton<IDisplayPreferencesManager, DisplayPreferencesManager>();
+            serviceCollection.AddSingleton<IActivityManager, ActivityManager>();
+            serviceCollection.AddSingleton<IUserManager, UserManager>();
+            serviceCollection.AddSingleton<IAuthenticationProvider, DefaultAuthenticationProvider>();
+            serviceCollection.AddSingleton<IAuthenticationProvider, InvalidAuthProvider>();
+            serviceCollection.AddSingleton<IPasswordResetProvider, DefaultPasswordResetProvider>();
+            serviceCollection.AddSingleton<IDisplayPreferencesManager, DisplayPreferencesManager>();
+            serviceCollection.AddSingleton<IDeviceManager, DeviceManager>();
+            serviceCollection.AddSingleton<ITrickplayManager, TrickplayManager>();
 
             // TODO search the assemblies instead of adding them manually?
-            ServiceCollection.AddSingleton<IWebSocketListener, SessionWebSocketListener>();
-            ServiceCollection.AddSingleton<IWebSocketListener, ActivityLogWebSocketListener>();
-            ServiceCollection.AddSingleton<IWebSocketListener, ScheduledTasksWebSocketListener>();
-            ServiceCollection.AddSingleton<IWebSocketListener, SessionInfoWebSocketListener>();
+            serviceCollection.AddSingleton<IWebSocketListener, SessionWebSocketListener>();
+            serviceCollection.AddSingleton<IWebSocketListener, ActivityLogWebSocketListener>();
+            serviceCollection.AddSingleton<IWebSocketListener, ScheduledTasksWebSocketListener>();
+            serviceCollection.AddSingleton<IWebSocketListener, SessionInfoWebSocketListener>();
 
-            base.RegisterServices();
+            serviceCollection.AddSingleton<IAuthorizationContext, AuthorizationContext>();
+
+            serviceCollection.AddScoped<IAuthenticationManager, AuthenticationManager>();
+
+            foreach (var type in GetExportTypes<ILyricProvider>())
+            {
+                serviceCollection.AddSingleton(typeof(ILyricProvider), type);
+            }
+
+            foreach (var type in GetExportTypes<ILyricParser>())
+            {
+                serviceCollection.AddSingleton(typeof(ILyricParser), type);
+            }
+
+            base.RegisterServices(serviceCollection);
         }
-
-        /// <inheritdoc />
-        protected override void RestartInternal() => Program.Restart();
 
         /// <inheritdoc />
         protected override IEnumerable<Assembly> GetAssembliesWithPartsInternal()
@@ -103,11 +117,14 @@ namespace Jellyfin.Server
             // Jellyfin.Server
             yield return typeof(CoreAppHost).Assembly;
 
-            // Jellyfin.Server.Implementations
-            yield return typeof(JellyfinDb).Assembly;
-        }
+            // Jellyfin.Database.Implementations
+            yield return typeof(JellyfinDbContext).Assembly;
 
-        /// <inheritdoc />
-        protected override void ShutdownInternal() => Program.Shutdown();
+            // Jellyfin.Server.Implementations
+            yield return typeof(ServiceCollectionExtensions).Assembly;
+
+            // Jellyfin.LiveTv
+            yield return typeof(LiveTvManager).Assembly;
+        }
     }
 }

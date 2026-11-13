@@ -1,6 +1,3 @@
-#nullable disable
-
-#nullable enable
 #pragma warning disable CS1591
 
 using System;
@@ -47,14 +44,15 @@ namespace MediaBrowser.Controller.Entities
         /// <param name="file">The file.</param>
         public static void SetImagePath(this BaseItem item, ImageType imageType, string file)
         {
-            if (file.StartsWith("http", System.StringComparison.OrdinalIgnoreCase))
+            if (file.StartsWith("http", StringComparison.OrdinalIgnoreCase))
             {
                 item.SetImage(
-                new ItemImageInfo
-                {
-                    Path = file,
-                    Type = imageType
-                }, 0);
+                    new ItemImageInfo
+                    {
+                        Path = file,
+                        Type = imageType
+                    },
+                    0);
             }
             else
             {
@@ -67,19 +65,15 @@ namespace MediaBrowser.Controller.Entities
         /// </summary>
         /// <param name="source">The source object.</param>
         /// <param name="dest">The destination object.</param>
+        /// <typeparam name="T">Source type.</typeparam>
+        /// <typeparam name="TU">Destination type.</typeparam>
         public static void DeepCopy<T, TU>(this T source, TU dest)
             where T : BaseItem
             where TU : BaseItem
         {
-            if (source == null)
-            {
-                throw new ArgumentNullException(nameof(source));
-            }
+            ArgumentNullException.ThrowIfNull(source);
 
-            if (dest == null)
-            {
-                throw new ArgumentNullException(nameof(dest));
-            }
+            ArgumentNullException.ThrowIfNull(dest);
 
             var destProps = typeof(TU).GetProperties().Where(x => x.CanWrite).ToList();
 
@@ -95,16 +89,13 @@ namespace MediaBrowser.Controller.Entities
                 }
 
                 var v = sourceProp.GetValue(source);
-                if (v == null)
+                if (v is null)
                 {
                     continue;
                 }
 
                 var p = destProps.Find(x => x.Name == sourceProp.Name);
-                if (p != null)
-                {
-                    p.SetValue(dest, v);
-                }
+                p?.SetValue(dest, v);
             }
         }
 
@@ -112,6 +103,9 @@ namespace MediaBrowser.Controller.Entities
         /// Copies all properties on newly created object. Skips properties that do not exist.
         /// </summary>
         /// <param name="source">The source object.</param>
+        /// <typeparam name="T">Source type.</typeparam>
+        /// <typeparam name="TU">Destination type.</typeparam>
+        /// <returns>Destination object.</returns>
         public static TU DeepCopy<T, TU>(this T source)
             where T : BaseItem
             where TU : BaseItem, new()
@@ -119,6 +113,20 @@ namespace MediaBrowser.Controller.Entities
             var dest = new TU();
             source.DeepCopy(dest);
             return dest;
+        }
+
+        /// <summary>
+        /// Determines if the item has changed.
+        /// </summary>
+        /// <param name="source">The source object.</param>
+        /// <param name="asOf">The timestamp to detect changes as of.</param>
+        /// <typeparam name="T">Source type.</typeparam>
+        /// <returns>Whether the item has changed.</returns>
+        public static bool HasChanged<T>(this T source, DateTime asOf)
+            where T : BaseItem
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            return source.DateModified.Subtract(asOf).Duration().TotalSeconds > 1;
         }
     }
 }

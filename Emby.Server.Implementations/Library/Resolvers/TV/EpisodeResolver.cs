@@ -1,11 +1,16 @@
 #nullable disable
 
 using System;
+using System.IO;
 using System.Linq;
-using MediaBrowser.Controller.Entities;
+using Emby.Naming.Common;
+using Emby.Server.Implementations.Library;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
+using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.Library.Resolvers.TV
 {
@@ -17,9 +22,11 @@ namespace Emby.Server.Implementations.Library.Resolvers.TV
         /// <summary>
         /// Initializes a new instance of the <see cref="EpisodeResolver"/> class.
         /// </summary>
-        /// <param name="libraryManager">The library manager.</param>
-        public EpisodeResolver(ILibraryManager libraryManager)
-            : base(libraryManager)
+        /// <param name="logger">The logger.</param>
+        /// <param name="namingOptions">The naming options.</param>
+        /// <param name="directoryService">The directory service.</param>
+        public EpisodeResolver(ILogger<EpisodeResolver> logger, NamingOptions namingOptions, IDirectoryService directoryService)
+            : base(logger, namingOptions, directoryService)
         {
         }
 
@@ -28,11 +35,11 @@ namespace Emby.Server.Implementations.Library.Resolvers.TV
         /// </summary>
         /// <param name="args">The args.</param>
         /// <returns>Episode.</returns>
-        public override Episode Resolve(ItemResolveArgs args)
+        protected override Episode Resolve(ItemResolveArgs args)
         {
             var parent = args.Parent;
 
-            if (parent == null)
+            if (parent is null)
             {
                 return null;
             }
@@ -44,40 +51,66 @@ namespace Emby.Server.Implementations.Library.Resolvers.TV
 
             // If the parent is a Season or Series and the parent is not an extras folder, then this is an Episode if the VideoResolver returns something
             // Also handle flat tv folders
-            if ((season != null ||
-                 string.Equals(args.GetCollectionType(), CollectionType.TvShows, StringComparison.OrdinalIgnoreCase) ||
-                 args.HasParent<Series>())
-                && (parent is Series || !BaseItem.AllExtrasTypesFolderNames.Contains(parent.Name, StringComparer.OrdinalIgnoreCase)))
+            if (season is not null
+                || args.GetCollectionType() == CollectionType.tvshows
+                || args.HasParent<Series>())
             {
                 var episode = ResolveVideo<Episode>(args, false);
 
-                if (episode != null)
+                // Ignore extras
+                if (episode is null || episode.ExtraType is not null)
                 {
-                    var series = parent as Series ?? parent.GetParents().OfType<Series>().FirstOrDefault();
-
-                    if (series != null)
-                    {
-                        episode.SeriesId = series.Id;
-                        episode.SeriesName = series.Name;
-                    }
-
-                    if (season != null)
-                    {
-                        episode.SeasonId = season.Id;
-                        episode.SeasonName = season.Name;
-                    }
-
-                    // Assume season 1 if there's no season folder and a season number could not be determined
-                    if (season == null && !episode.ParentIndexNumber.HasValue && (episode.IndexNumber.HasValue || episode.PremiereDate.HasValue))
-                    {
-                        episode.ParentIndexNumber = 1;
-                    }
+                    return null;
                 }
+
+                var series = parent as Series ?? parent.GetParents().OfType<Series>().FirstOrDefault();
+
+                if (series is not null)
+                {
+                    episode.SeriesId = series.Id;
+                    episode.SeriesName = series.Name;
+                }
+
+                if (season is not null)
+                {
+                    episode.SeasonId = season.Id;
+                    episode.SeasonName = season.Name;
+                }
+
+                // Assume season 1 if there's no season folder and a season number could not be determined
+                if (season is null && !episode.ParentIndexNumber.HasValue && (episode.IndexNumber.HasValue || episode.PremiereDate.HasValue))
+                {
+                    episode.ParentIndexNumber = 1;
+                }
+
+                SetProviderIdFromPath(episode, args.Path);
 
                 return episode;
             }
 
             return null;
+        }
+
+        /// <summary>
+        /// Sets provider ids from the episode file name.
+        /// </summary>
+        /// <param name="item">The episode.</param>
+        /// <param name="path">The episode file path.</param>
+        private static void SetProviderIdFromPath(Episode item, string path)
+        {
+            var justName = Path.GetFileNameWithoutExtension(path.AsSpan());
+
+            var imdbId = justName.GetAttributeValue("imdbid");
+            item.TrySetProviderId(MetadataProvider.Imdb, imdbId);
+
+            var tvdbId = justName.GetAttributeValue("tvdbid");
+            item.TrySetProviderId(MetadataProvider.Tvdb, tvdbId);
+
+            var tvmazeId = justName.GetAttributeValue("tvmazeid");
+            item.TrySetProviderId(MetadataProvider.TvMaze, tvmazeId);
+
+            var tmdbId = justName.GetAttributeValue("tmdbid");
+            item.TrySetProviderId(MetadataProvider.Tmdb, tmdbId);
         }
     }
 }

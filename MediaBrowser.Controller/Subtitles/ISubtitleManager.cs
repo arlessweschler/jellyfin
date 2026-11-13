@@ -1,9 +1,6 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Controller.Entities;
@@ -20,18 +17,19 @@ namespace MediaBrowser.Controller.Subtitles
         event EventHandler<SubtitleDownloadFailureEventArgs> SubtitleDownloadFailure;
 
         /// <summary>
-        /// Adds the parts.
-        /// </summary>
-        /// <param name="subtitleProviders">The subtitle providers.</param>
-        void AddParts(IEnumerable<ISubtitleProvider> subtitleProviders);
-
-        /// <summary>
         /// Searches the subtitles.
         /// </summary>
+        /// <param name="video">The video.</param>
+        /// <param name="language">Subtitle language.</param>
+        /// <param name="isPerfectMatch">Require perfect match.</param>
+        /// <param name="isAutomated">Request is automated.</param>
+        /// <param name="cancellationToken">CancellationToken to use for the operation.</param>
+        /// <returns>Subtitles, wrapped in task.</returns>
         Task<RemoteSubtitleInfo[]> SearchSubtitles(
             Video video,
             string language,
             bool? isPerfectMatch,
+            bool isAutomated,
             CancellationToken cancellationToken);
 
         /// <summary>
@@ -47,11 +45,20 @@ namespace MediaBrowser.Controller.Subtitles
         /// <summary>
         /// Downloads the subtitles.
         /// </summary>
+        /// <param name="video">The video.</param>
+        /// <param name="subtitleId">Subtitle ID.</param>
+        /// <param name="cancellationToken">CancellationToken to use for the operation.</param>
+        /// <returns>A task.</returns>
         Task DownloadSubtitles(Video video, string subtitleId, CancellationToken cancellationToken);
 
         /// <summary>
         /// Downloads the subtitles.
         /// </summary>
+        /// <param name="video">The video.</param>
+        /// <param name="libraryOptions">Library options to use.</param>
+        /// <param name="subtitleId">Subtitle ID.</param>
+        /// <param name="cancellationToken">CancellationToken to use for the operation.</param>
+        /// <returns>A task.</returns>
         Task DownloadSubtitles(Video video, LibraryOptions libraryOptions, string subtitleId, CancellationToken cancellationToken);
 
         /// <summary>
@@ -73,11 +80,16 @@ namespace MediaBrowser.Controller.Subtitles
         /// <summary>
         /// Deletes the subtitles.
         /// </summary>
+        /// <param name="item">Media item.</param>
+        /// <param name="index">Subtitle index.</param>
+        /// <returns>A task.</returns>
         Task DeleteSubtitles(BaseItem item, int index);
 
         /// <summary>
         /// Gets the providers.
         /// </summary>
+        /// <param name="item">The media item.</param>
+        /// <returns>Subtitles providers.</returns>
         SubtitleProviderInfo[] GetSupportedProviders(BaseItem item);
     }
 }

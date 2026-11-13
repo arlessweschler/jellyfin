@@ -1,4 +1,5 @@
 using System;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Sorting;
 using MediaBrowser.Model.Querying;
@@ -11,6 +12,12 @@ namespace Emby.Server.Implementations.Sorting
     public class RandomComparer : IBaseItemComparer
     {
         /// <summary>
+        /// Gets the name.
+        /// </summary>
+        /// <value>The name.</value>
+        public ItemSortBy Type => ItemSortBy.Random;
+
+        /// <summary>
         /// Compares the specified x.
         /// </summary>
         /// <param name="x">The x.</param>
@@ -20,11 +27,5 @@ namespace Emby.Server.Implementations.Sorting
         {
             return Guid.NewGuid().CompareTo(Guid.NewGuid());
         }
-
-        /// <summary>
-        /// Gets the name.
-        /// </summary>
-        /// <value>The name.</value>
-        public string Name => ItemSortBy.Random;
     }
 }

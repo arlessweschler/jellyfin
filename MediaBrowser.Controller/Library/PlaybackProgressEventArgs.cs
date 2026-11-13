@@ -1,10 +1,10 @@
 #nullable disable
 
-#pragma warning disable CS1591
+#pragma warning disable CA1002, CA2227, CS1591
 
 using System;
 using System.Collections.Generic;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Dto;

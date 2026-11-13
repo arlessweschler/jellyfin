@@ -1,154 +1,121 @@
+using System;
 using System.ComponentModel.DataAnnotations;
-using Jellyfin.Api.Constants;
+using System.Threading.Tasks;
 using Jellyfin.Api.Helpers;
 using MediaBrowser.Common.Extensions;
+using MediaBrowser.Controller.Authentication;
+using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.QuickConnect;
 using MediaBrowser.Model.QuickConnect;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
-namespace Jellyfin.Api.Controllers
+namespace Jellyfin.Api.Controllers;
+
+/// <summary>
+/// Quick connect controller.
+/// </summary>
+[Tags("Authentication")]
+public class QuickConnectController : BaseJellyfinApiController
 {
+    private readonly IQuickConnect _quickConnect;
+    private readonly IAuthorizationContext _authContext;
+
     /// <summary>
-    /// Quick connect controller.
+    /// Initializes a new instance of the <see cref="QuickConnectController"/> class.
     /// </summary>
-    public class QuickConnectController : BaseJellyfinApiController
+    /// <param name="quickConnect">Instance of the <see cref="IQuickConnect"/> interface.</param>
+    /// <param name="authContext">Instance of the <see cref="IAuthorizationContext"/> interface.</param>
+    public QuickConnectController(IQuickConnect quickConnect, IAuthorizationContext authContext)
     {
-        private readonly IQuickConnect _quickConnect;
+        _quickConnect = quickConnect;
+        _authContext = authContext;
+    }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="QuickConnectController"/> class.
-        /// </summary>
-        /// <param name="quickConnect">Instance of the <see cref="IQuickConnect"/> interface.</param>
-        public QuickConnectController(IQuickConnect quickConnect)
+    /// <summary>
+    /// Gets the current quick connect state.
+    /// </summary>
+    /// <response code="200">Quick connect state returned.</response>
+    /// <returns>Whether Quick Connect is enabled on the server or not.</returns>
+    [HttpGet("Enabled")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<bool> GetQuickConnectEnabled()
+    {
+        return _quickConnect.IsEnabled;
+    }
+
+    /// <summary>
+    /// Initiate a new quick connect request.
+    /// </summary>
+    /// <response code="200">Quick connect request successfully created.</response>
+    /// <response code="401">Quick connect is not active on this server.</response>
+    /// <returns>A <see cref="QuickConnectResult"/> with a secret and code for future use or an error message.</returns>
+    [HttpPost("Initiate")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    public async Task<ActionResult<QuickConnectResult>> InitiateQuickConnect()
+    {
+        try
         {
-            _quickConnect = quickConnect;
+            var auth = await _authContext.GetAuthorizationInfo(Request).ConfigureAwait(false);
+            return _quickConnect.TryConnect(auth);
         }
-
-        /// <summary>
-        /// Gets the current quick connect state.
-        /// </summary>
-        /// <response code="200">Quick connect state returned.</response>
-        /// <returns>The current <see cref="QuickConnectState"/>.</returns>
-        [HttpGet("Status")]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QuickConnectState> GetStatus()
+        catch (AuthenticationException)
         {
-            _quickConnect.ExpireRequests();
-            return _quickConnect.State;
+            return Unauthorized("Quick connect is disabled");
         }
+    }
 
-        /// <summary>
-        /// Initiate a new quick connect request.
-        /// </summary>
-        /// <response code="200">Quick connect request successfully created.</response>
-        /// <response code="401">Quick connect is not active on this server.</response>
-        /// <returns>A <see cref="QuickConnectResult"/> with a secret and code for future use or an error message.</returns>
-        [HttpGet("Initiate")]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QuickConnectResult> Initiate()
+    /// <summary>
+    /// Attempts to retrieve authentication information.
+    /// </summary>
+    /// <param name="secret">Secret previously returned from the Initiate endpoint.</param>
+    /// <response code="200">Quick connect result returned.</response>
+    /// <response code="404">Unknown quick connect secret.</response>
+    /// <returns>An updated <see cref="QuickConnectResult"/>.</returns>
+    [HttpGet("Connect")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<QuickConnectResult> GetQuickConnectState([FromQuery, Required] string secret)
+    {
+        try
         {
-            return _quickConnect.TryConnect();
+            return _quickConnect.CheckRequestStatus(secret);
         }
-
-        /// <summary>
-        /// Attempts to retrieve authentication information.
-        /// </summary>
-        /// <param name="secret">Secret previously returned from the Initiate endpoint.</param>
-        /// <response code="200">Quick connect result returned.</response>
-        /// <response code="404">Unknown quick connect secret.</response>
-        /// <returns>An updated <see cref="QuickConnectResult"/>.</returns>
-        [HttpGet("Connect")]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        public ActionResult<QuickConnectResult> Connect([FromQuery, Required] string secret)
+        catch (ResourceNotFoundException)
         {
-            try
-            {
-                return _quickConnect.CheckRequestStatus(secret);
-            }
-            catch (ResourceNotFoundException)
-            {
-                return NotFound("Unknown secret");
-            }
+            return NotFound("Unknown secret");
         }
-
-        /// <summary>
-        /// Temporarily activates quick connect for five minutes.
-        /// </summary>
-        /// <response code="204">Quick connect has been temporarily activated.</response>
-        /// <response code="403">Quick connect is unavailable on this server.</response>
-        /// <returns>An <see cref="NoContentResult"/> on success.</returns>
-        [HttpPost("Activate")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        [ProducesResponseType(StatusCodes.Status403Forbidden)]
-        public ActionResult Activate()
+        catch (AuthenticationException)
         {
-            if (_quickConnect.State == QuickConnectState.Unavailable)
-            {
-                return StatusCode(StatusCodes.Status403Forbidden, "Quick connect is unavailable");
-            }
-
-            _quickConnect.Activate();
-            return NoContent();
+            return Unauthorized("Quick connect is disabled");
         }
+    }
 
-        /// <summary>
-        /// Enables or disables quick connect.
-        /// </summary>
-        /// <param name="status">New <see cref="QuickConnectState"/>.</param>
-        /// <response code="204">Quick connect state set successfully.</response>
-        /// <returns>An <see cref="NoContentResult"/> on success.</returns>
-        [HttpPost("Available")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult Available([FromQuery] QuickConnectState status = QuickConnectState.Available)
+    /// <summary>
+    /// Authorizes a pending quick connect request.
+    /// </summary>
+    /// <param name="code">Quick connect code to authorize.</param>
+    /// <param name="userId">The user the authorize. Access to the requested user is required.</param>
+    /// <response code="200">Quick connect result authorized successfully.</response>
+    /// <response code="403">Unknown user id.</response>
+    /// <returns>Boolean indicating if the authorization was successful.</returns>
+    [HttpPost("Authorize")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<bool>> AuthorizeQuickConnect([FromQuery, Required] string code, [FromQuery] Guid? userId = null)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+
+        try
         {
-            _quickConnect.SetState(status);
-            return NoContent();
+            return await _quickConnect.AuthorizeRequest(userId.Value, code).ConfigureAwait(false);
         }
-
-        /// <summary>
-        /// Authorizes a pending quick connect request.
-        /// </summary>
-        /// <param name="code">Quick connect code to authorize.</param>
-        /// <response code="200">Quick connect result authorized successfully.</response>
-        /// <response code="403">Unknown user id.</response>
-        /// <returns>Boolean indicating if the authorization was successful.</returns>
-        [HttpPost("Authorize")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status403Forbidden)]
-        public ActionResult<bool> Authorize([FromQuery, Required] string code)
+        catch (AuthenticationException)
         {
-            var userId = ClaimHelpers.GetUserId(Request.HttpContext.User);
-            if (!userId.HasValue)
-            {
-                return StatusCode(StatusCodes.Status403Forbidden, "Unknown user id");
-            }
-
-            return _quickConnect.AuthorizeRequest(userId.Value, code);
-        }
-
-        /// <summary>
-        /// Deauthorize all quick connect devices for the current user.
-        /// </summary>
-        /// <response code="200">All quick connect devices were deleted.</response>
-        /// <returns>The number of devices that were deleted.</returns>
-        [HttpPost("Deauthorize")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<int> Deauthorize()
-        {
-            var userId = ClaimHelpers.GetUserId(Request.HttpContext.User);
-            if (!userId.HasValue)
-            {
-                return 0;
-            }
-
-            return _quickConnect.DeleteAllDevices(userId.Value);
+            return Unauthorized("Quick connect is disabled");
         }
     }
 }

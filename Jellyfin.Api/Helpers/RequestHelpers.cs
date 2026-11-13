@@ -1,149 +1,188 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
-using Jellyfin.Data.Entities;
-using Jellyfin.Data.Enums;
+using System.Security.Claims;
+using System.Threading.Tasks;
+using Jellyfin.Api.Constants;
+using Jellyfin.Api.Extensions;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Http;
 
-namespace Jellyfin.Api.Helpers
+namespace Jellyfin.Api.Helpers;
+
+/// <summary>
+/// Request Extensions.
+/// </summary>
+public static class RequestHelpers
 {
     /// <summary>
-    /// Request Extensions.
+    /// Get Order By.
     /// </summary>
-    public static class RequestHelpers
+    /// <param name="sortBy">Sort By. Comma delimited string.</param>
+    /// <param name="requestedSortOrder">Sort Order. Comma delimited string.</param>
+    /// <typeparam name="TSortBy">The type of the sort by field.</typeparam>
+    /// <returns>Order By.</returns>
+    public static (TSortBy, SortOrder)[] GetOrderBy<TSortBy>(IReadOnlyList<TSortBy> sortBy, IReadOnlyList<SortOrder> requestedSortOrder)
     {
-        /// <summary>
-        /// Get Order By.
-        /// </summary>
-        /// <param name="sortBy">Sort By. Comma delimited string.</param>
-        /// <param name="requestedSortOrder">Sort Order. Comma delimited string.</param>
-        /// <returns>Order By.</returns>
-        public static (string, SortOrder)[] GetOrderBy(IReadOnlyList<string> sortBy, IReadOnlyList<SortOrder> requestedSortOrder)
+        if (sortBy.Count == 0)
         {
-            if (sortBy.Count == 0)
-            {
-                return Array.Empty<ValueTuple<string, SortOrder>>();
-            }
-
-            var result = new (string, SortOrder)[sortBy.Count];
-            var i = 0;
-            // Add elements which have a SortOrder specified
-            for (; i < requestedSortOrder.Count; i++)
-            {
-                result[i] = (sortBy[i], requestedSortOrder[i]);
-            }
-
-            // Add remaining elements with the first specified SortOrder
-            // or the default one if no SortOrders are specified
-            var order = requestedSortOrder.Count > 0 ? requestedSortOrder[0] : SortOrder.Ascending;
-            for (; i < sortBy.Count; i++)
-            {
-                result[i] = (sortBy[i], order);
-            }
-
-            return result;
+            return Array.Empty<(TSortBy, SortOrder)>();
         }
 
-        /// <summary>
-        /// Checks if the user can update an entry.
-        /// </summary>
-        /// <param name="authContext">Instance of the <see cref="IAuthorizationContext"/> interface.</param>
-        /// <param name="requestContext">The <see cref="HttpRequest"/>.</param>
-        /// <param name="userId">The user id.</param>
-        /// <param name="restrictUserPreferences">Whether to restrict the user preferences.</param>
-        /// <returns>A <see cref="bool"/> whether the user can update the entry.</returns>
-        internal static bool AssertCanUpdateUser(IAuthorizationContext authContext, HttpRequest requestContext, Guid userId, bool restrictUserPreferences)
+        var result = new (TSortBy, SortOrder)[sortBy.Count];
+        var i = 0;
+        // Add elements which have a SortOrder specified
+        for (; i < requestedSortOrder.Count; i++)
         {
-            var auth = authContext.GetAuthorizationInfo(requestContext);
+            result[i] = (sortBy[i], requestedSortOrder[i]);
+        }
 
-            var authenticatedUser = auth.User;
+        // Add remaining elements with the first specified SortOrder
+        // or the default one if no SortOrders are specified
+        var order = requestedSortOrder.Count > 0 ? requestedSortOrder[0] : SortOrder.Ascending;
+        for (; i < sortBy.Count; i++)
+        {
+            result[i] = (sortBy[i], order);
+        }
 
-            // If they're going to update the record of another user, they must be an administrator
-            if ((!userId.Equals(auth.UserId) && !authenticatedUser.HasPermission(PermissionKind.IsAdministrator))
-                || (restrictUserPreferences && !authenticatedUser.EnableUserPreferenceAccess))
-            {
-                return false;
-            }
+        return result;
+    }
 
+    /// <summary>
+    /// Checks if the user can access a user.
+    /// </summary>
+    /// <param name="claimsPrincipal">The <see cref="ClaimsPrincipal"/> for the current request.</param>
+    /// <param name="userId">The user id.</param>
+    /// <returns>A <see cref="bool"/> whether the user can access the user.</returns>
+    internal static Guid GetUserId(ClaimsPrincipal claimsPrincipal, Guid? userId)
+    {
+        var authenticatedUserId = claimsPrincipal.GetUserId();
+
+        // UserId not provided, fall back to authenticated user id.
+        if (userId.IsNullOrEmpty())
+        {
+            return authenticatedUserId;
+        }
+
+        // User must be administrator to access another user.
+        var isAdministrator = claimsPrincipal.IsInRole(UserRoles.Administrator);
+        if (!userId.Value.Equals(authenticatedUserId) && !isAdministrator)
+        {
+            throw new SecurityException("Forbidden");
+        }
+
+        return userId.Value;
+    }
+
+    /// <summary>
+    /// Checks if the user can update an entry.
+    /// </summary>
+    /// <param name="claimsPrincipal">The <see cref="ClaimsPrincipal"/> for the current request.</param>
+    /// <param name="user">The user id.</param>
+    /// <param name="restrictUserPreferences">Whether to restrict the user preferences.</param>
+    /// <returns>A <see cref="bool"/> whether the user can update the entry.</returns>
+    internal static bool AssertCanUpdateUser(ClaimsPrincipal claimsPrincipal, User user, bool restrictUserPreferences)
+    {
+        var authenticatedUserId = claimsPrincipal.GetUserId();
+        var isAdministrator = claimsPrincipal.IsInRole(UserRoles.Administrator);
+
+        // If they're going to update the record of another user, they must be an administrator
+        if (!user.Id.Equals(authenticatedUserId) && !isAdministrator)
+        {
+            return false;
+        }
+
+        // TODO the EnableUserPreferenceAccess policy does not seem to be used elsewhere
+        if (!restrictUserPreferences || isAdministrator)
+        {
             return true;
         }
 
-        internal static SessionInfo GetSession(ISessionManager sessionManager, IAuthorizationContext authContext, HttpRequest request)
+        return user.EnableUserPreferenceAccess;
+    }
+
+    /// <summary>
+    /// Get the session based on http request.
+    /// </summary>
+    /// <param name="sessionManager">The session manager.</param>
+    /// <param name="userManager">The user manager.</param>
+    /// <param name="httpContext">The http context.</param>
+    /// <param name="userId">The optional userid.</param>
+    /// <returns>The session.</returns>
+    /// <exception cref="ResourceNotFoundException">Session not found.</exception>
+    public static async Task<SessionInfo> GetSession(ISessionManager sessionManager, IUserManager userManager, HttpContext httpContext, Guid? userId = null)
+    {
+        userId ??= httpContext.User.GetUserId();
+        User? user = null;
+        if (!userId.IsNullOrEmpty())
         {
-            var authorization = authContext.GetAuthorizationInfo(request);
-            var user = authorization.User;
-            var session = sessionManager.LogSessionActivity(
-                authorization.Client,
-                authorization.Version,
-                authorization.DeviceId,
-                authorization.Device,
-                request.HttpContext.GetNormalizedRemoteIp().ToString(),
-                user);
-
-            if (session == null)
-            {
-                throw new ArgumentException("Session not found.");
-            }
-
-            return session;
+            user = userManager.GetUserById(userId.Value);
         }
 
-        internal static QueryResult<BaseItemDto> CreateQueryResult(
-            QueryResult<(BaseItem, ItemCounts)> result,
-            DtoOptions dtoOptions,
-            IDtoService dtoService,
-            bool includeItemTypes,
-            User? user)
+        var session = await sessionManager.LogSessionActivity(
+            httpContext.User.GetClient(),
+            httpContext.User.GetVersion(),
+            httpContext.User.GetDeviceId(),
+            httpContext.User.GetDevice(),
+            httpContext.GetNormalizedRemoteIP().ToString(),
+            user).ConfigureAwait(false);
+
+        if (session is null)
         {
-            var dtos = result.Items.Select(i =>
-            {
-                var (baseItem, counts) = i;
-                var dto = dtoService.GetItemByNameDto(baseItem, dtoOptions, null, user);
-
-                if (includeItemTypes)
-                {
-                    dto.ChildCount = counts.ItemCount;
-                    dto.ProgramCount = counts.ProgramCount;
-                    dto.SeriesCount = counts.SeriesCount;
-                    dto.EpisodeCount = counts.EpisodeCount;
-                    dto.MovieCount = counts.MovieCount;
-                    dto.TrailerCount = counts.TrailerCount;
-                    dto.AlbumCount = counts.AlbumCount;
-                    dto.SongCount = counts.SongCount;
-                    dto.ArtistCount = counts.ArtistCount;
-                }
-
-                return dto;
-            });
-
-            return new QueryResult<BaseItemDto>
-            {
-                Items = dtos.ToArray(),
-                TotalRecordCount = result.TotalRecordCount
-            };
+            throw new ResourceNotFoundException("Session not found.");
         }
 
-        internal static string[] GetItemTypeStrings(IReadOnlyList<BaseItemKind> itemKinds)
+        return session;
+    }
+
+    internal static async Task<string> GetSessionId(ISessionManager sessionManager, IUserManager userManager, HttpContext httpContext)
+    {
+        var session = await GetSession(sessionManager, userManager, httpContext).ConfigureAwait(false);
+
+        return session.Id;
+    }
+
+    internal static QueryResult<BaseItemDto> CreateQueryResult(
+        QueryResult<(BaseItem Item, ItemCounts ItemCounts)> result,
+        DtoOptions dtoOptions,
+        IDtoService dtoService,
+        User? user)
+    {
+        var dtos = result.Items.Select(i =>
         {
-            if (itemKinds.Count == 0)
+            var (baseItem, counts) = i;
+            var dto = dtoService.GetItemByNameDto(baseItem, dtoOptions, null, user);
+
+            if (counts is not null)
             {
-                return Array.Empty<string>();
+                dto.ChildCount = counts.ItemCount;
+                dto.ProgramCount = counts.ProgramCount;
+                dto.SeriesCount = counts.SeriesCount;
+                dto.EpisodeCount = counts.EpisodeCount;
+                dto.MovieCount = counts.MovieCount;
+                dto.TrailerCount = counts.TrailerCount;
+                dto.AlbumCount = counts.AlbumCount;
+                dto.SongCount = counts.SongCount;
+                dto.ArtistCount = counts.ArtistCount;
+                dto.MusicVideoCount = counts.MusicVideoCount;
             }
 
-            var itemTypes = new string[itemKinds.Count];
-            for (var i = 0; i < itemKinds.Count; i++)
-            {
-                itemTypes[i] = itemKinds[i].ToString();
-            }
+            return dto;
+        });
 
-            return itemTypes;
-        }
+        return new QueryResult<BaseItemDto>(
+            result.StartIndex,
+            result.TotalRecordCount,
+            dtos.ToArray());
     }
 }

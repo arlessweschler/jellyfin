@@ -1,126 +1,102 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Model.Entities;
 
 namespace Emby.Server.Implementations.Library
 {
     public static class MediaStreamSelector
     {
-        public static int? GetDefaultAudioStreamIndex(List<MediaStream> streams, string[] preferredLanguages, bool preferDefaultTrack)
+        public static int? GetDefaultAudioStreamIndex(IReadOnlyList<MediaStream> streams, IReadOnlyList<string> preferredLanguages, bool preferDefaultTrack)
         {
-            streams = GetSortedStreams(streams, MediaStreamType.Audio, preferredLanguages)
-               .ToList();
+            var sortedStreams = GetSortedStreams(streams, MediaStreamType.Audio, preferredLanguages).ToList();
 
             if (preferDefaultTrack)
             {
-                var defaultStream = streams.FirstOrDefault(i => i.IsDefault);
+                var defaultStream = sortedStreams.FirstOrDefault(i => i.IsDefault);
 
-                if (defaultStream != null)
+                if (defaultStream is not null)
                 {
                     return defaultStream.Index;
                 }
             }
 
-            var stream = streams.FirstOrDefault();
-
-            if (stream != null)
-            {
-                return stream.Index;
-            }
-
-            return null;
+            return sortedStreams.FirstOrDefault()?.Index;
         }
 
         public static int? GetDefaultSubtitleStreamIndex(
-            List<MediaStream> streams,
-            string[] preferredLanguages,
+            IEnumerable<MediaStream> streams,
+            IReadOnlyList<string> preferredLanguages,
             SubtitlePlaybackMode mode,
             string audioTrackLanguage)
         {
-            streams = GetSortedStreams(streams, MediaStreamType.Subtitle, preferredLanguages)
-                .ToList();
-
-            MediaStream stream = null;
-
             if (mode == SubtitlePlaybackMode.None)
             {
                 return null;
             }
 
+            // Sort in the following order: Default > No tag > Forced
+            var sortedStreams = streams
+                .Where(i => i.Type == MediaStreamType.Subtitle)
+                .OrderByDescending(x => x.IsExternal)
+                .ThenByDescending(x => x.IsDefault)
+                .ThenByDescending(x => !x.IsForced && MatchesPreferredLanguage(x.Language, preferredLanguages))
+                .ThenByDescending(x => x.IsForced && MatchesPreferredLanguage(x.Language, preferredLanguages))
+                .ThenByDescending(x => x.IsForced && IsLanguageUndefined(x.Language))
+                .ThenByDescending(x => x.IsForced)
+                .ToList();
+
+            MediaStream? stream = null;
+
             if (mode == SubtitlePlaybackMode.Default)
             {
-                // Prefer embedded metadata over smart logic
-
-                stream = streams.FirstOrDefault(s => s.IsForced && string.Equals(s.Language, audioTrackLanguage, StringComparison.OrdinalIgnoreCase)) ??
-                    streams.FirstOrDefault(s => s.IsForced) ??
-                    streams.FirstOrDefault(s => s.IsDefault);
-
-                // if the audio language is not understood by the user, load their preferred subs, if there are any
-                if (stream == null && !preferredLanguages.Contains(audioTrackLanguage, StringComparer.OrdinalIgnoreCase))
-                {
-                    stream = streams.Where(s => !s.IsForced).FirstOrDefault(s => preferredLanguages.Contains(s.Language, StringComparer.OrdinalIgnoreCase));
-                }
+                // Load subtitles according to external, default and forced flags.
+                stream = sortedStreams.FirstOrDefault(x => x.IsExternal || x.IsDefault || x.IsForced);
             }
             else if (mode == SubtitlePlaybackMode.Smart)
             {
-                // Prefer smart logic over embedded metadata
-
-                // if the audio language is not understood by the user, load their preferred subs, if there are any
-                if (!preferredLanguages.Contains(audioTrackLanguage, StringComparer.OrdinalIgnoreCase))
+                // Only attempt to load subtitles if the audio language is not one of the user's preferred subtitle languages.
+                // If no subtitles of preferred language available, use none.
+                // If the audio language is one of the user's preferred subtitle languages behave like OnlyForced.
+                if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    stream = streams.Where(s => !s.IsForced).FirstOrDefault(s => preferredLanguages.Contains(s.Language, StringComparer.OrdinalIgnoreCase)) ??
-                        streams.FirstOrDefault(s => preferredLanguages.Contains(s.Language, StringComparer.OrdinalIgnoreCase));
+                    stream = sortedStreams.FirstOrDefault(x => MatchesPreferredLanguage(x.Language, preferredLanguages));
+                }
+                else
+                {
+                    stream = BehaviorOnlyForced(sortedStreams, preferredLanguages).FirstOrDefault();
                 }
             }
             else if (mode == SubtitlePlaybackMode.Always)
             {
-                // always load the most suitable full subtitles
-                stream = streams.FirstOrDefault(s => !s.IsForced);
+                // Always load (full/non-forced) subtitles of the user's preferred subtitle language if possible, otherwise OnlyForced behaviour.
+                stream = sortedStreams.FirstOrDefault(x => !x.IsForced && MatchesPreferredLanguage(x.Language, preferredLanguages)) ??
+                    BehaviorOnlyForced(sortedStreams, preferredLanguages).FirstOrDefault();
             }
             else if (mode == SubtitlePlaybackMode.OnlyForced)
             {
-                // always load the most suitable full subtitles
-                stream = streams.FirstOrDefault(s => s.IsForced && string.Equals(s.Language, audioTrackLanguage, StringComparison.OrdinalIgnoreCase)) ??
-                    streams.FirstOrDefault(s => s.IsForced);
+                // Load subtitles that are flagged forced of the user's preferred subtitle language or with an undefined language
+                stream = BehaviorOnlyForced(sortedStreams, preferredLanguages).FirstOrDefault();
             }
 
-            // load forced subs if we have found no suitable full subtitles
-            stream ??= streams.FirstOrDefault(s => s.IsForced && string.Equals(s.Language, audioTrackLanguage, StringComparison.OrdinalIgnoreCase));
-
-            if (stream != null)
-            {
-                return stream.Index;
-            }
-
-            return null;
+            return stream?.Index;
         }
 
-        private static IEnumerable<MediaStream> GetSortedStreams(IEnumerable<MediaStream> streams, MediaStreamType type, string[] languagePreferences)
+        private static IEnumerable<MediaStream> GetSortedStreams(IEnumerable<MediaStream> streams, MediaStreamType type, IReadOnlyList<string> languagePreferences)
         {
             // Give some preference to external text subs for better performance
-            return streams.Where(i => i.Type == type)
-                .OrderBy(i =>
-            {
-                var index = FindIndex(languagePreferences, i.Language);
-
-                return index == -1 ? 100 : index;
-            })
-                 .ThenBy(i => GetBooleanOrderBy(i.IsDefault))
-                 .ThenBy(i => GetBooleanOrderBy(i.SupportsExternalStream))
-                 .ThenBy(i => GetBooleanOrderBy(i.IsTextSubtitleStream))
-                 .ThenBy(i => GetBooleanOrderBy(i.IsExternal))
-                 .ThenBy(i => i.Index);
+            return streams
+                .Where(i => i.Type == type)
+                .OrderByDescending(i => GetStreamScore(i, languagePreferences));
         }
 
         public static void SetSubtitleStreamScores(
-            List<MediaStream> streams,
-            string[] preferredLanguages,
+            IReadOnlyList<MediaStream> streams,
+            IReadOnlyList<string> preferredLanguages,
             SubtitlePlaybackMode mode,
             string audioTrackLanguage)
         {
@@ -129,95 +105,89 @@ namespace Emby.Server.Implementations.Library
                 return;
             }
 
-            streams = GetSortedStreams(streams, MediaStreamType.Subtitle, preferredLanguages)
-                .ToList();
+            var sortedStreams = GetSortedStreams(streams, MediaStreamType.Subtitle, preferredLanguages).ToList();
 
-            var filteredStreams = new List<MediaStream>();
+            List<MediaStream>? filteredStreams = null;
 
             if (mode == SubtitlePlaybackMode.Default)
             {
                 // Prefer embedded metadata over smart logic
-                filteredStreams = streams.Where(s => s.IsForced || s.IsDefault)
+                // Load subtitles according to external, default, and forced flags.
+                filteredStreams = sortedStreams.Where(s => s.IsExternal || s.IsDefault || s.IsForced)
                     .ToList();
             }
             else if (mode == SubtitlePlaybackMode.Smart)
             {
                 // Prefer smart logic over embedded metadata
-                if (!preferredLanguages.Contains(audioTrackLanguage, StringComparer.OrdinalIgnoreCase))
+                // Only attempt to load subtitles if the audio language is not one of the user's preferred subtitle languages, otherwise OnlyForced behavior.
+                if (!preferredLanguages.Contains(audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
                 {
-                    filteredStreams = streams.Where(s => !s.IsForced && preferredLanguages.Contains(s.Language, StringComparer.OrdinalIgnoreCase))
+                    filteredStreams = sortedStreams.Where(s => MatchesPreferredLanguage(s.Language, preferredLanguages))
                         .ToList();
+                }
+                else
+                {
+                    filteredStreams = BehaviorOnlyForced(sortedStreams, preferredLanguages);
                 }
             }
             else if (mode == SubtitlePlaybackMode.Always)
             {
-                // always load the most suitable full subtitles
-                filteredStreams = streams.Where(s => !s.IsForced)
-                    .ToList();
+                // Always load (full/non-forced) subtitles of the user's preferred subtitle language if possible, otherwise OnlyForced behavior.
+                filteredStreams = sortedStreams.Where(s => !s.IsForced && MatchesPreferredLanguage(s.Language, preferredLanguages))
+                    .ToList() ?? BehaviorOnlyForced(sortedStreams, preferredLanguages);
             }
             else if (mode == SubtitlePlaybackMode.OnlyForced)
             {
-                // always load the most suitable full subtitles
-                filteredStreams = streams.Where(s => s.IsForced).ToList();
+                // Load subtitles that are flagged forced of the user's preferred subtitle language or with an undefined language
+                filteredStreams = BehaviorOnlyForced(sortedStreams, preferredLanguages);
             }
 
-            // load forced subs if we have found no suitable full subtitles
-            if (filteredStreams.Count == 0)
-            {
-                filteredStreams = streams
-                    .Where(s => s.IsForced && string.Equals(s.Language, audioTrackLanguage, StringComparison.OrdinalIgnoreCase))
-                    .ToList();
-            }
+            // If filteredStreams is null, initialize it as an empty list to avoid null reference errors
+            filteredStreams ??= new List<MediaStream>();
 
             foreach (var stream in filteredStreams)
             {
-                stream.Score = GetSubtitleScore(stream, preferredLanguages);
+                stream.Score = GetStreamScore(stream, preferredLanguages);
             }
         }
 
-        private static int FindIndex(string[] list, string value)
+        private static bool MatchesPreferredLanguage(string language, IReadOnlyList<string> preferredLanguages)
         {
-            for (var i = 0; i < list.Length; i++)
-            {
-                if (string.Equals(list[i], value, StringComparison.OrdinalIgnoreCase))
-                {
-                    return i;
-                }
-            }
-
-            return -1;
+            // If preferredLanguages is empty, treat it as "any language" (wildcard)
+            return preferredLanguages.Count == 0 ||
+                preferredLanguages.Contains(language, StringComparison.OrdinalIgnoreCase);
         }
 
-        private static int GetSubtitleScore(MediaStream stream, string[] languagePreferences)
+        private static bool IsLanguageUndefined(string language)
         {
-            var values = new List<int>();
+            // Check for null, empty, or known placeholders
+            return string.IsNullOrEmpty(language) ||
+                language.Equals("und", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("unknown", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("undetermined", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("mul", StringComparison.OrdinalIgnoreCase) ||
+                language.Equals("zxx", StringComparison.OrdinalIgnoreCase);
+        }
 
-            var index = FindIndex(languagePreferences, stream.Language);
+        private static List<MediaStream> BehaviorOnlyForced(IEnumerable<MediaStream> sortedStreams, IReadOnlyList<string> preferredLanguages)
+        {
+            return sortedStreams
+                .Where(s => s.IsForced && (MatchesPreferredLanguage(s.Language, preferredLanguages) || IsLanguageUndefined(s.Language)))
+                .OrderByDescending(s => MatchesPreferredLanguage(s.Language, preferredLanguages))
+                .ThenByDescending(s => IsLanguageUndefined(s.Language))
+                .ToList();
+        }
 
-            values.Add(index == -1 ? 0 : 100 - index);
-
-            values.Add(stream.IsForced ? 1 : 0);
-            values.Add(stream.IsDefault ? 1 : 0);
-            values.Add(stream.SupportsExternalStream ? 1 : 0);
-            values.Add(stream.IsTextSubtitleStream ? 1 : 0);
-            values.Add(stream.IsExternal ? 1 : 0);
-
-            values.Reverse();
-            var scale = 1;
-            var score = 0;
-
-            foreach (var value in values)
-            {
-                score += scale * (value + 1);
-                scale *= 10;
-            }
-
+        internal static int GetStreamScore(MediaStream stream, IReadOnlyList<string> languagePreferences)
+        {
+            var index = languagePreferences.FindIndex(x => string.Equals(x, stream.Language, StringComparison.OrdinalIgnoreCase));
+            var score = index == -1 ? 1 : 101 - index;
+            score = (score * 10) + (stream.IsForced ? 2 : 1);
+            score = (score * 10) + (stream.IsDefault ? 2 : 1);
+            score = (score * 10) + (stream.SupportsExternalStream ? 2 : 1);
+            score = (score * 10) + (stream.IsTextSubtitleStream ? 2 : 1);
+            score = (score * 10) + (stream.IsExternal ? 2 : 1);
             return score;
-        }
-
-        private static int GetBooleanOrderBy(bool value)
-        {
-            return value ? 0 : 1;
         }
     }
 }

@@ -1,11 +1,13 @@
 using System;
-using System.Globalization;
+using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Xml;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.Extensions;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using Microsoft.Extensions.Logging;
@@ -40,72 +42,92 @@ namespace MediaBrowser.XbmcMetadata.Parsers
         /// <inheritdoc />
         protected override void Fetch(MetadataResult<Episode> item, string metadataFile, XmlReaderSettings settings, CancellationToken cancellationToken)
         {
-            using (var fileStream = File.OpenRead(metadataFile))
-            using (var streamReader = new StreamReader(fileStream, Encoding.UTF8))
+            item.ResetPeople();
+
+            var xmlFile = File.ReadAllText(metadataFile);
+
+            // Split the nfo into its episodedetails blocks.
+            // This is needed because XBMC metadata uses multiple episodedetails blocks instead of an episodenumberend tag.
+            const string Srch = "</episodedetails>";
+            var blocks = new List<string>();
+            int index;
+            while ((index = xmlFile.IndexOf(Srch, StringComparison.OrdinalIgnoreCase)) != -1)
             {
-                item.ResetPeople();
+                blocks.Add(xmlFile.Substring(0, index + Srch.Length));
+                xmlFile = xmlFile.Substring(index + Srch.Length);
+            }
 
-                var xmlFile = streamReader.ReadToEnd();
+            if (blocks.Count == 0)
+            {
+                // No closing tag, let the xml reader deal with whatever is in the file
+                blocks.Add(xmlFile);
+            }
 
-                var srch = "</episodedetails>";
-                var index = xmlFile.IndexOf(srch, StringComparison.OrdinalIgnoreCase);
-
-                var xml = xmlFile;
-
-                if (index != -1)
+            // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
+            try
+            {
+                if (blocks.Count == 1)
                 {
-                    xml = xmlFile.Substring(0, index + srch.Length);
-                    xmlFile = xmlFile.Substring(index + srch.Length);
+                    ReadEpisodeDetailsFromXml(item, blocks[0], settings, cancellationToken);
+                    return;
                 }
 
-                // These are not going to be valid xml so no sense in causing the provider to fail and spamming the log with exceptions
-                try
-                {
-                    // Extract episode details from the first episodedetails block
-                    using (var stringReader = new StringReader(xml))
-                    using (var reader = XmlReader.Create(stringReader, settings))
+                // The blocks are not guaranteed to be written in ascending episode order, so parse them all
+                // and sort them before merging.
+                var episodes = blocks
+                    .Select(block =>
                     {
-                        reader.MoveToContent();
-                        reader.Read();
-
-                        // Loop through each element
-                        while (!reader.EOF && reader.ReadState == ReadState.Interactive)
+                        var episode = new MetadataResult<Episode>()
                         {
-                            cancellationToken.ThrowIfCancellationRequested();
+                            Item = new Episode()
+                        };
 
-                            if (reader.NodeType == XmlNodeType.Element)
-                            {
-                                FetchDataFromXmlNode(reader, item);
-                            }
-                            else
-                            {
-                                reader.Read();
-                            }
-                        }
+                        ReadEpisodeDetailsFromXml(episode, block, settings, cancellationToken);
+
+                        return (Xml: block, Result: episode);
+                    })
+                    .OrderBy(episode => episode.Result.Item.IndexNumber ?? int.MaxValue)
+                    .ToList();
+
+                // Extract the details of the lowest numbered episode into the item that is returned to the caller
+                ReadEpisodeDetailsFromXml(item, episodes[0].Xml, settings, cancellationToken);
+
+                // Concatenate the name, originalTitle and overview tags of the remaining episodes with the first one
+                // and take the highest episode number as the last episode of the file
+                var name = new StringBuilder(item.Item.Name);
+                var originalTitle = new StringBuilder(item.Item.OriginalTitle);
+                var overview = new StringBuilder(item.Item.Overview);
+                for (var i = 1; i < episodes.Count; i++)
+                {
+                    var additionalEpisode = episodes[i].Result;
+
+                    if (!string.IsNullOrEmpty(additionalEpisode.Item.Name))
+                    {
+                        name.Append(" / ").Append(additionalEpisode.Item.Name);
                     }
 
-                    // Extract the last episode number from nfo
-                    // This is needed because XBMC metadata uses multiple episodedetails blocks instead of episodenumberend tag
-                    while ((index = xmlFile.IndexOf(srch, StringComparison.OrdinalIgnoreCase)) != -1)
+                    if (!string.IsNullOrEmpty(additionalEpisode.Item.Overview))
                     {
-                        xml = xmlFile.Substring(0, index + srch.Length);
-                        xmlFile = xmlFile.Substring(index + srch.Length);
+                        overview.Append(" / ").Append(additionalEpisode.Item.Overview);
+                    }
 
-                        using (var stringReader = new StringReader(xml))
-                        using (var reader = XmlReader.Create(stringReader, settings))
-                        {
-                            reader.MoveToContent();
+                    if (!string.IsNullOrEmpty(additionalEpisode.Item.OriginalTitle))
+                    {
+                        originalTitle.Append(" / ").Append(additionalEpisode.Item.OriginalTitle);
+                    }
 
-                            if (reader.ReadToDescendant("episode") && int.TryParse(reader.ReadElementContentAsString(), out var num))
-                            {
-                                item.Item.IndexNumberEnd = Math.Max(num, item.Item.IndexNumberEnd ?? num);
-                            }
-                        }
+                    if (additionalEpisode.Item.IndexNumber is not null)
+                    {
+                        item.Item.IndexNumberEnd = Math.Max((int)additionalEpisode.Item.IndexNumber, item.Item.IndexNumberEnd ?? (int)additionalEpisode.Item.IndexNumber);
                     }
                 }
-                catch (XmlException)
-                {
-                }
+
+                item.Item.Name = name.ToString();
+                item.Item.OriginalTitle = originalTitle.ToString();
+                item.Item.Overview = overview.ToString();
+            }
+            catch (XmlException)
+            {
             }
         }
 
@@ -117,145 +139,84 @@ namespace MediaBrowser.XbmcMetadata.Parsers
             switch (reader.Name)
             {
                 case "season":
+                    if (reader.TryReadInt(out var seasonNumber))
                     {
-                        var number = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(number))
-                        {
-                            if (int.TryParse(number, out var num))
-                            {
-                                item.ParentIndexNumber = num;
-                            }
-                        }
-
-                        break;
+                        item.ParentIndexNumber = seasonNumber;
                     }
 
+                    break;
                 case "episode":
+                    if (reader.TryReadInt(out var episodeNumber))
                     {
-                        var number = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(number))
-                        {
-                            if (int.TryParse(number, out var num))
-                            {
-                                item.IndexNumber = num;
-                            }
-                        }
-
-                        break;
+                        item.IndexNumber = episodeNumber;
                     }
 
+                    break;
                 case "episodenumberend":
+                    if (reader.TryReadInt(out var episodeNumberEnd))
                     {
-                        var number = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(number))
-                        {
-                            if (int.TryParse(number, out var num))
-                            {
-                                item.IndexNumberEnd = num;
-                            }
-                        }
-
-                        break;
+                        item.IndexNumberEnd = episodeNumberEnd;
                     }
 
+                    break;
                 case "airsbefore_episode":
-                    {
-                        var val = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(val))
-                        {
-                            // int.TryParse is local aware, so it can be problematic, force us culture
-                            if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
-                            {
-                                item.AirsBeforeEpisodeNumber = rval;
-                            }
-                        }
-
-                        break;
-                    }
-
-                case "airsafter_season":
-                    {
-                        var val = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(val))
-                        {
-                            // int.TryParse is local aware, so it can be problematic, force us culture
-                            if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
-                            {
-                                item.AirsAfterSeasonNumber = rval;
-                            }
-                        }
-
-                        break;
-                    }
-
-                case "airsbefore_season":
-                    {
-                        var val = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(val))
-                        {
-                            // int.TryParse is local aware, so it can be problematic, force us culture
-                            if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
-                            {
-                                item.AirsBeforeSeasonNumber = rval;
-                            }
-                        }
-
-                        break;
-                    }
-
-                case "displayseason":
-                    {
-                        var val = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(val))
-                        {
-                            // int.TryParse is local aware, so it can be problematic, force us culture
-                            if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
-                            {
-                                item.AirsBeforeSeasonNumber = rval;
-                            }
-                        }
-
-                        break;
-                    }
-
                 case "displayepisode":
+                    if (reader.TryReadInt(out var airsBeforeEpisode))
                     {
-                        var val = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(val))
-                        {
-                            // int.TryParse is local aware, so it can be problematic, force us culture
-                            if (int.TryParse(val, NumberStyles.Integer, UsCulture, out var rval))
-                            {
-                                item.AirsBeforeEpisodeNumber = rval;
-                            }
-                        }
-
-                        break;
+                        item.AirsBeforeEpisodeNumber = airsBeforeEpisode;
                     }
 
+                    break;
+                case "airsafter_season":
+                case "displayafterseason":
+                    if (reader.TryReadInt(out var airsAfterSeason))
+                    {
+                        item.AirsAfterSeasonNumber = airsAfterSeason;
+                    }
+
+                    break;
+                case "airsbefore_season":
+                case "displayseason":
+                    if (reader.TryReadInt(out var airsBeforeSeason))
+                    {
+                        item.AirsBeforeSeasonNumber = airsBeforeSeason;
+                    }
+
+                    break;
                 case "showtitle":
-                    {
-                        var showtitle = reader.ReadElementContentAsString();
-
-                        if (!string.IsNullOrWhiteSpace(showtitle))
-                        {
-                            item.SeriesName = showtitle;
-                        }
-
-                        break;
-                    }
-
+                    item.SeriesName = reader.ReadNormalizedString();
+                    break;
                 default:
                     base.FetchDataFromXmlNode(reader, itemResult);
                     break;
+            }
+        }
+
+        /// <summary>
+        /// Reads the episode details from the given xml and saves the result in the provided result item.
+        /// </summary>
+        private void ReadEpisodeDetailsFromXml(MetadataResult<Episode> item, string xml, XmlReaderSettings settings, CancellationToken cancellationToken)
+        {
+            using (var stringReader = new StringReader(xml))
+            using (var reader = XmlReader.Create(stringReader, settings))
+            {
+                reader.MoveToContent();
+                reader.Read();
+
+                // Loop through each element
+                while (!reader.EOF && reader.ReadState == ReadState.Interactive)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (reader.NodeType == XmlNodeType.Element)
+                    {
+                        FetchDataFromXmlNode(reader, item);
+                    }
+                    else
+                    {
+                        reader.Read();
+                    }
+                }
             }
         }
     }

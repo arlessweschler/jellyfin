@@ -1,18 +1,19 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using Jellyfin.Api.Constants;
-using Jellyfin.Data.Entities;
-using Jellyfin.Data.Enums;
+using Jellyfin.Data;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Configuration;
 using Microsoft.AspNetCore.Http;
 using Moq;
-using AccessSchedule = Jellyfin.Data.Entities.AccessSchedule;
+using AccessSchedule = Jellyfin.Database.Implementations.Entities.AccessSchedule;
 
 namespace Jellyfin.Api.Tests
 {
@@ -36,7 +37,7 @@ namespace Jellyfin.Api.Tests
             user.SetPermission(PermissionKind.IsAdministrator, role.Equals(UserRoles.Administrator, StringComparison.OrdinalIgnoreCase));
 
             // Add access schedules if set.
-            if (accessSchedules != null)
+            if (accessSchedules is not null)
             {
                 foreach (var accessSchedule in accessSchedules)
                 {

@@ -12,6 +12,11 @@ namespace Emby.Server.Implementations
         /// <summary>
         /// Initializes a new instance of the <see cref="ServerApplicationPaths" /> class.
         /// </summary>
+        /// <param name="programDataPath">The path for Jellyfin's data.</param>
+        /// <param name="logDirectoryPath">The path for Jellyfin's logging directory.</param>
+        /// <param name="configurationDirectoryPath">The path for Jellyfin's configuration directory.</param>
+        /// <param name="cacheDirectoryPath">The path for Jellyfin's cache directory.</param>
+        /// <param name="webDirectoryPath">The path for Jellyfin's web UI.</param>
         public ServerApplicationPaths(
             string programDataPath,
             string logDirectoryPath,
@@ -25,6 +30,10 @@ namespace Emby.Server.Implementations
                 cacheDirectoryPath,
                 webDirectoryPath)
         {
+            // ProgramDataPath cannot change when the server is running, so cache these to avoid allocations.
+            RootFolderPath = Path.Join(ProgramDataPath, "root");
+            DefaultUserViewsPath = Path.Combine(RootFolderPath, "default");
+            DefaultInternalMetadataPath = Path.Combine(ProgramDataPath, "metadata");
             InternalMetadataPath = DefaultInternalMetadataPath;
         }
 
@@ -32,13 +41,13 @@ namespace Emby.Server.Implementations
         /// Gets the path to the base root media directory.
         /// </summary>
         /// <value>The root folder path.</value>
-        public string RootFolderPath => Path.Combine(ProgramDataPath, "root");
+        public string RootFolderPath { get; }
 
         /// <summary>
         /// Gets the path to the default user view directory.  Used if no specific user view is defined.
         /// </summary>
         /// <value>The default user views path.</value>
-        public string DefaultUserViewsPath => Path.Combine(RootFolderPath, "default");
+        public string DefaultUserViewsPath { get; }
 
         /// <summary>
         /// Gets the path to the People directory.
@@ -74,36 +83,25 @@ namespace Emby.Server.Implementations
         public string YearPath => Path.Combine(InternalMetadataPath, "Year");
 
         /// <summary>
-        /// Gets the path to the General IBN directory.
-        /// </summary>
-        /// <value>The general path.</value>
-        public string GeneralPath => Path.Combine(InternalMetadataPath, "general");
-
-        /// <summary>
-        /// Gets the path to the Ratings IBN directory.
-        /// </summary>
-        /// <value>The ratings path.</value>
-        public string RatingsPath => Path.Combine(InternalMetadataPath, "ratings");
-
-        /// <summary>
-        /// Gets the media info images path.
-        /// </summary>
-        /// <value>The media info images path.</value>
-        public string MediaInfoImagesPath => Path.Combine(InternalMetadataPath, "mediainfo");
-
-        /// <summary>
         /// Gets the path to the user configuration directory.
         /// </summary>
         /// <value>The user configuration directory path.</value>
         public string UserConfigurationDirectoryPath => Path.Combine(ConfigurationDirectoryPath, "users");
 
         /// <inheritdoc/>
-        public string DefaultInternalMetadataPath => Path.Combine(ProgramDataPath, "metadata");
+        public string DefaultInternalMetadataPath { get; }
 
         /// <inheritdoc />
         public string InternalMetadataPath { get; set; }
 
         /// <inheritdoc />
         public string VirtualInternalMetadataPath => "%MetadataPath%";
+
+        /// <inheritdoc/>
+        public override void MakeSanityCheckOrThrow()
+        {
+            base.MakeSanityCheckOrThrow();
+            CreateAndCheckMarker(RootFolderPath, "root");
+        }
     }
 }

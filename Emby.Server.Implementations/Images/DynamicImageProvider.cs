@@ -6,6 +6,8 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
@@ -34,14 +36,14 @@ namespace Emby.Server.Implementations.Images
             var view = (UserView)item;
 
             var isUsingCollectionStrip = IsUsingCollectionStrip(view);
-            var recursive = isUsingCollectionStrip && !new[] { CollectionType.BoxSets, CollectionType.Playlists }.Contains(view.ViewType ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+            var recursive = isUsingCollectionStrip && view?.ViewType is not null && view.ViewType != CollectionType.boxsets && view.ViewType != CollectionType.playlists;
 
             var result = view.GetItemList(new InternalItemsQuery
             {
                 User = view.UserId.HasValue ? _userManager.GetUserById(view.UserId.Value) : null,
                 CollapseBoxSetItems = false,
                 Recursive = recursive,
-                ExcludeItemTypes = new[] { "UserView", "CollectionFolder", "Person" },
+                ExcludeItemTypes = new[] { BaseItemKind.UserView, BaseItemKind.CollectionFolder, BaseItemKind.Person },
                 DtoOptions = new DtoOptions(false)
             });
 
@@ -50,7 +52,7 @@ namespace Emby.Server.Implementations.Images
                 if (i is Episode episode)
                 {
                     var series = episode.Series;
-                    if (series != null)
+                    if (series is not null)
                     {
                         return series;
                     }
@@ -61,7 +63,7 @@ namespace Emby.Server.Implementations.Images
                 if (i is Season season)
                 {
                     var series = season.Series;
-                    if (series != null)
+                    if (series is not null)
                     {
                         return series;
                     }
@@ -72,26 +74,30 @@ namespace Emby.Server.Implementations.Images
                 if (i is Audio audio)
                 {
                     var album = audio.AlbumEntity;
-                    if (album != null && album.HasImage(ImageType.Primary))
+                    if (album is not null && album.HasImage(ImageType.Primary))
                     {
                         return album;
                     }
                 }
 
                 return i;
-            }).GroupBy(x => x.Id)
-            .Select(x => x.First());
+            }).DistinctBy(x => x.Id);
 
+            List<BaseItem> returnItems;
             if (isUsingCollectionStrip)
             {
-                return items
+                returnItems = items
                     .Where(i => i.HasImage(ImageType.Primary) || i.HasImage(ImageType.Thumb))
                     .ToList();
+                returnItems.Shuffle();
+                return returnItems;
             }
 
-            return items
+            returnItems = items
                 .Where(i => i.HasImage(ImageType.Primary))
                 .ToList();
+            returnItems.Shuffle();
+            return returnItems;
         }
 
         protected override bool Supports(BaseItem item)
@@ -106,14 +112,14 @@ namespace Emby.Server.Implementations.Images
 
         private static bool IsUsingCollectionStrip(UserView view)
         {
-            string[] collectionStripViewTypes =
+            CollectionType[] collectionStripViewTypes =
             {
-                CollectionType.Movies,
-                CollectionType.TvShows,
-                CollectionType.Playlists
+                CollectionType.movies,
+                CollectionType.tvshows,
+                CollectionType.playlists
             };
 
-            return collectionStripViewTypes.Contains(view.ViewType ?? string.Empty);
+            return view?.ViewType is not null && collectionStripViewTypes.Contains(view.ViewType.Value);
         }
 
         protected override string CreateImage(BaseItem item, IReadOnlyCollection<BaseItem> itemsWithImages, string outputPathWithoutExtension, ImageType imageType, int imageIndex)

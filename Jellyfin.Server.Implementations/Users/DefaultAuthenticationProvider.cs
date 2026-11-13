@@ -1,11 +1,11 @@
 using System;
-using System.Linq;
-using System.Text;
+using System.Diagnostics.CodeAnalysis;
+using System.Globalization;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
-using MediaBrowser.Common.Cryptography;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Authentication;
 using MediaBrowser.Model.Cryptography;
+using Microsoft.Extensions.Logging;
 
 namespace Jellyfin.Server.Implementations.Users
 {
@@ -14,14 +14,17 @@ namespace Jellyfin.Server.Implementations.Users
     /// </summary>
     public class DefaultAuthenticationProvider : IAuthenticationProvider, IRequiresResolvedUser
     {
+        private readonly ILogger<DefaultAuthenticationProvider> _logger;
         private readonly ICryptoProvider _cryptographyProvider;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="DefaultAuthenticationProvider"/> class.
         /// </summary>
+        /// <param name="logger">The logger.</param>
         /// <param name="cryptographyProvider">The cryptography provider.</param>
-        public DefaultAuthenticationProvider(ICryptoProvider cryptographyProvider)
+        public DefaultAuthenticationProvider(ILogger<DefaultAuthenticationProvider> logger, ICryptoProvider cryptographyProvider)
         {
+            _logger = logger;
             _cryptographyProvider = cryptographyProvider;
         }
 
@@ -42,17 +45,21 @@ namespace Jellyfin.Server.Implementations.Users
 
         /// <inheritdoc />
         // This is the version that we need to use for local users. Because reasons.
-        public Task<ProviderAuthenticationResult> Authenticate(string username, string password, User resolvedUser)
+        public Task<ProviderAuthenticationResult> Authenticate(string username, string password, User? resolvedUser)
         {
-            if (resolvedUser == null)
+            [DoesNotReturn]
+            static void ThrowAuthenticationException()
             {
-                throw new AuthenticationException("Specified user does not exist.");
+                throw new AuthenticationException("Invalid username or password");
             }
 
-            bool success = false;
+            if (resolvedUser is null)
+            {
+                ThrowAuthenticationException();
+            }
 
             // As long as jellyfin supports password-less users, we need this little block here to accommodate
-            if (!HasPassword(resolvedUser) && string.IsNullOrEmpty(password))
+            if (string.IsNullOrEmpty(resolvedUser.Password) && string.IsNullOrEmpty(password))
             {
                 return Task.FromResult(new ProviderAuthenticationResult
                 {
@@ -61,33 +68,23 @@ namespace Jellyfin.Server.Implementations.Users
             }
 
             // Handle the case when the stored password is null, but the user tried to login with a password
-            if (resolvedUser.Password != null)
+            if (resolvedUser.Password is null)
             {
-                byte[] passwordBytes = Encoding.UTF8.GetBytes(password);
-
-                PasswordHash readyHash = PasswordHash.Parse(resolvedUser.Password);
-                if (_cryptographyProvider.GetSupportedHashMethods().Contains(readyHash.Id)
-                    || _cryptographyProvider.DefaultHashMethod == readyHash.Id)
-                {
-                    byte[] calculatedHash = _cryptographyProvider.ComputeHash(
-                        readyHash.Id,
-                        passwordBytes,
-                        readyHash.Salt.ToArray());
-
-                    if (readyHash.Hash.SequenceEqual(calculatedHash))
-                    {
-                        success = true;
-                    }
-                }
-                else
-                {
-                    throw new AuthenticationException($"Requested crypto method not available in provider: {readyHash.Id}");
-                }
+                ThrowAuthenticationException();
             }
 
-            if (!success)
+            PasswordHash readyHash = PasswordHash.Parse(resolvedUser.Password);
+            if (!_cryptographyProvider.Verify(readyHash, password))
             {
-                throw new AuthenticationException("Invalid username or password");
+                ThrowAuthenticationException();
+            }
+
+            // Migrate old hashes to the new default
+            if (!string.Equals(readyHash.Id, _cryptographyProvider.DefaultHashMethod, StringComparison.Ordinal)
+                || int.Parse(readyHash.Parameters["iterations"], CultureInfo.InvariantCulture) != Constants.DefaultIterations)
+            {
+                _logger.LogInformation("Migrating password hash of {User} to the latest default", username);
+                ChangePassword(resolvedUser, password);
             }
 
             return Task.FromResult(new ProviderAuthenticationResult
@@ -95,10 +92,6 @@ namespace Jellyfin.Server.Implementations.Users
                 Username = username
             });
         }
-
-        /// <inheritdoc />
-        public bool HasPassword(User user)
-            => !string.IsNullOrEmpty(user?.Password);
 
         /// <inheritdoc />
         public Task ChangePassword(User user, string newPassword)

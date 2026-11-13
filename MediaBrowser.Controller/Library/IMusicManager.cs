@@ -1,9 +1,7 @@
-#nullable disable
-
-#pragma warning disable CS1591
+#pragma warning disable CA1002, CS1591
 
 using System.Collections.Generic;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
@@ -15,16 +13,28 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// Gets the instant mix from song.
         /// </summary>
-        List<BaseItem> GetInstantMixFromItem(BaseItem item, User user, DtoOptions dtoOptions);
+        /// <param name="item">The item to use.</param>
+        /// <param name="user">The user to use.</param>
+        /// <param name="dtoOptions">The options to use.</param>
+        /// <returns>List of items.</returns>
+        IReadOnlyList<BaseItem> GetInstantMixFromItem(BaseItem item, User? user, DtoOptions dtoOptions);
 
         /// <summary>
         /// Gets the instant mix from artist.
         /// </summary>
-        List<BaseItem> GetInstantMixFromArtist(MusicArtist artist, User user, DtoOptions dtoOptions);
+        /// <param name="artist">The artist to use.</param>
+        /// <param name="user">The user to use.</param>
+        /// <param name="dtoOptions">The options to use.</param>
+        /// <returns>List of items.</returns>
+        IReadOnlyList<BaseItem> GetInstantMixFromArtist(MusicArtist artist, User? user, DtoOptions dtoOptions);
 
         /// <summary>
         /// Gets the instant mix from genre.
         /// </summary>
-        List<BaseItem> GetInstantMixFromGenres(IEnumerable<string> genres, User user, DtoOptions dtoOptions);
+        /// <param name="genres">The genres to use.</param>
+        /// <param name="user">The user to use.</param>
+        /// <param name="dtoOptions">The options to use.</param>
+        /// <returns>List of items.</returns>
+        IReadOnlyList<BaseItem> GetInstantMixFromGenres(IEnumerable<string> genres, User? user, DtoOptions dtoOptions);
     }
 }

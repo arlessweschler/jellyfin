@@ -6,6 +6,8 @@ namespace MediaBrowser.Model.Dlna
     {
         Audio = 0,
         Video = 1,
-        Photo = 2
+        Photo = 2,
+        Subtitle = 3,
+        Lyric = 4
     }
 }

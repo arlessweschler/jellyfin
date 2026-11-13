@@ -71,18 +71,18 @@ namespace MediaBrowser.Model.Drawing
             int? fillHeight)
         {
             // Return original size if input is invalid.
-            if ((fillWidth == null || fillWidth == 0)
-                && (fillHeight == null || fillHeight == 0))
+            if ((fillWidth is null || fillWidth == 0)
+                && (fillHeight is null || fillHeight == 0))
             {
                 return size;
             }
 
-            if (fillWidth == null || fillWidth == 0)
+            if (fillWidth is null || fillWidth == 0)
             {
                 fillWidth = 1;
             }
 
-            if (fillHeight == null || fillHeight == 0)
+            if (fillHeight is null || fillHeight == 0)
             {
                 fillHeight = 1;
             }
@@ -99,6 +99,35 @@ namespace MediaBrowser.Model.Drawing
 
             int newWidth = Convert.ToInt32(Math.Ceiling(size.Width / scaleRatio));
             int newHeight = Convert.ToInt32(Math.Ceiling(size.Height / scaleRatio));
+
+            return new ImageDimensions(newWidth, newHeight);
+        }
+
+        /// <summary>
+        /// Scales a size down uniformly until it fits inside a bounding box.
+        /// Returns the original size if it already fits, so this never upscales.
+        /// </summary>
+        /// <param name="size">The size object.</param>
+        /// <param name="boundingBox">The box the result has to fit inside.</param>
+        /// <returns>A new size object, or <paramref name="size"/> if it already fits.</returns>
+        public static ImageDimensions ScaleDownToFit(ImageDimensions size, ImageDimensions boundingBox)
+        {
+            if (size.Width <= 0 || size.Height <= 0 || boundingBox.Width <= 0 || boundingBox.Height <= 0)
+            {
+                return size;
+            }
+
+            double widthRatio = size.Width / (double)boundingBox.Width;
+            double heightRatio = size.Height / (double)boundingBox.Height;
+            double scaleRatio = Math.Max(widthRatio, heightRatio);
+
+            if (scaleRatio <= 1)
+            {
+                return size;
+            }
+
+            var newWidth = Math.Clamp(Convert.ToInt32(Math.Round(size.Width / scaleRatio)), 1, boundingBox.Width);
+            var newHeight = Math.Clamp(Convert.ToInt32(Math.Round(size.Height / scaleRatio)), 1, boundingBox.Height);
 
             return new ImageDimensions(newWidth, newHeight);
         }

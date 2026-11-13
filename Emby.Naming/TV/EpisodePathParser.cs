@@ -76,7 +76,7 @@ namespace Emby.Naming.TV
                 }
             }
 
-            if (result != null && fillExtendedInfo)
+            if (result is not null && fillExtendedInfo)
             {
                 FillAdditional(path, result);
 
@@ -113,7 +113,7 @@ namespace Emby.Naming.TV
                     if (expression.DateTimeFormats.Length > 0)
                     {
                         if (DateTime.TryParseExact(
-                            match.Groups[0].Value,
+                            match.Groups[0].ValueSpan,
                             expression.DateTimeFormats,
                             CultureInfo.InvariantCulture,
                             DateTimeStyles.None,
@@ -125,7 +125,7 @@ namespace Emby.Naming.TV
                             result.Success = true;
                         }
                     }
-                    else if (DateTime.TryParse(match.Groups[0].Value, out date))
+                    else if (DateTime.TryParse(match.Groups[0].ValueSpan, CultureInfo.InvariantCulture, out date))
                     {
                         result.Year = date.Year;
                         result.Month = date.Month;
@@ -138,12 +138,12 @@ namespace Emby.Naming.TV
                 }
                 else if (expression.IsNamed)
                 {
-                    if (int.TryParse(match.Groups["seasonnumber"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var num))
+                    if (int.TryParse(match.Groups["seasonnumber"].ValueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var num))
                     {
                         result.SeasonNumber = num;
                     }
 
-                    if (int.TryParse(match.Groups["epnumber"].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
+                    if (int.TryParse(match.Groups["epnumber"].ValueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
                     {
                         result.EpisodeNumber = num;
                     }
@@ -158,7 +158,9 @@ namespace Emby.Naming.TV
                         if (nextIndex >= name.Length
                             || !"0123456789iIpP".Contains(name[nextIndex], StringComparison.Ordinal))
                         {
-                            if (int.TryParse(endingNumberGroup.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
+                            // A range cannot end before it starts, so a lower number belongs to the episode title rather than to a range.
+                            if (int.TryParse(endingNumberGroup.ValueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out num)
+                                && num >= result.EpisodeNumber)
                             {
                                 result.EndingEpisodeNumber = num;
                             }
@@ -170,12 +172,12 @@ namespace Emby.Naming.TV
                 }
                 else
                 {
-                    if (int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var num))
+                    if (int.TryParse(match.Groups[1].ValueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out var num))
                     {
                         result.SeasonNumber = num;
                     }
 
-                    if (int.TryParse(match.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
+                    if (int.TryParse(match.Groups[2].ValueSpan, NumberStyles.Integer, CultureInfo.InvariantCulture, out num))
                     {
                         result.EpisodeNumber = num;
                     }
@@ -226,7 +228,7 @@ namespace Emby.Naming.TV
                     info.SeriesName = result.SeriesName;
                 }
 
-                if (!info.EndingEpisodeNumber.HasValue && info.EpisodeNumber.HasValue)
+                if (!info.EndingEpisodeNumber.HasValue && result.EndingEpisodeNumber >= info.EpisodeNumber)
                 {
                     info.EndingEpisodeNumber = result.EndingEpisodeNumber;
                 }

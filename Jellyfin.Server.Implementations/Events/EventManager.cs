@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Threading.Tasks;
 using MediaBrowser.Controller;
 using MediaBrowser.Controller.Events;
@@ -30,7 +30,7 @@ namespace Jellyfin.Server.Implementations.Events
         public void Publish<T>(T eventArgs)
             where T : EventArgs
         {
-            Task.WaitAll(PublishInternal(eventArgs));
+            PublishInternal(eventArgs).GetAwaiter().GetResult();
         }
 
         /// <inheritdoc />
@@ -44,7 +44,7 @@ namespace Jellyfin.Server.Implementations.Events
             where T : EventArgs
         {
             using var scope = _appHost.ServiceProvider?.CreateScope();
-            if (scope == null)
+            if (scope is null)
             {
                 return;
             }
@@ -57,7 +57,7 @@ namespace Jellyfin.Server.Implementations.Events
                 }
                 catch (Exception e)
                 {
-                    _logger.LogError(e, "Uncaught exception in EventConsumer {type}: ", service.GetType());
+                    _logger.LogError(e, "Uncaught exception in EventConsumer {Type}: ", service.GetType());
                 }
             }
         }

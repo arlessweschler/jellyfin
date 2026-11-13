@@ -5,75 +5,69 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using Jellyfin.Api.Extensions;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Querying;
 
 namespace Emby.Server.Implementations.Images
 {
     public class CollectionFolderImageProvider : BaseDynamicImageProvider<CollectionFolder>
     {
-        public CollectionFolderImageProvider(IFileSystem fileSystem, IProviderManager providerManager, IApplicationPaths applicationPaths, IImageProcessor imageProcessor) : base(fileSystem, providerManager, applicationPaths, imageProcessor)
+        private readonly ILibraryManager _libraryManager;
+
+        public CollectionFolderImageProvider(IFileSystem fileSystem, IProviderManager providerManager, IApplicationPaths applicationPaths, IImageProcessor imageProcessor, ILibraryManager libraryManager) : base(fileSystem, providerManager, applicationPaths, imageProcessor)
         {
+            _libraryManager = libraryManager;
         }
 
         protected override IReadOnlyList<BaseItem> GetItemsWithImages(BaseItem item)
         {
             var view = (CollectionFolder)item;
             var viewType = view.CollectionType;
+            var includeItemTypes = DtoExtensions.GetBaseItemKindsForCollectionType(viewType);
+            var recursive = viewType != CollectionType.playlists;
 
-            string[] includeItemTypes;
-
-            if (string.Equals(viewType, CollectionType.Movies))
+            if (viewType == CollectionType.music)
             {
-                includeItemTypes = new string[] { "Movie" };
+                // Music albums usually don't have dedicated backdrops, so use artist instead.
+                // Artists carry no library of their own, so an item query for them is not
+                // restricted to this library and would collage the artists of every music
+                // library. Resolve them through the tracks that credit them instead.
+                return GetArtistsWithImages(view);
             }
-            else if (string.Equals(viewType, CollectionType.TvShows))
-            {
-                includeItemTypes = new string[] { "Series" };
-            }
-            else if (string.Equals(viewType, CollectionType.Music))
-            {
-                includeItemTypes = new string[] { "MusicAlbum" };
-            }
-            else if (string.Equals(viewType, CollectionType.Books))
-            {
-                includeItemTypes = new string[] { "Book", "AudioBook" };
-            }
-            else if (string.Equals(viewType, CollectionType.BoxSets))
-            {
-                includeItemTypes = new string[] { "BoxSet" };
-            }
-            else if (string.Equals(viewType, CollectionType.HomeVideos) || string.Equals(viewType, CollectionType.Photos))
-            {
-                includeItemTypes = new string[] { "Video", "Photo" };
-            }
-            else
-            {
-                includeItemTypes = new string[] { "Video", "Audio", "Photo", "Movie", "Series" };
-            }
-
-            var recursive = !string.Equals(CollectionType.Playlists, viewType, StringComparison.OrdinalIgnoreCase);
 
             return view.GetItemList(new InternalItemsQuery
             {
                 CollapseBoxSetItems = false,
                 Recursive = recursive,
                 DtoOptions = new DtoOptions(false),
-                ImageTypes = new ImageType[] { ImageType.Primary },
+                ImageTypes = [ImageType.Primary],
                 Limit = 8,
-                OrderBy = new ValueTuple<string, SortOrder>[]
-                {
-                    new ValueTuple<string, SortOrder>(ItemSortBy.Random, SortOrder.Ascending)
-                },
+                OrderBy = [(ItemSortBy.Random, SortOrder.Ascending)],
                 IncludeItemTypes = includeItemTypes
             });
+        }
+
+        private IReadOnlyList<BaseItem> GetArtistsWithImages(CollectionFolder view)
+        {
+            return _libraryManager.GetAllArtists(new InternalItemsQuery
+            {
+                AncestorIds = [view.Id],
+                DtoOptions = new DtoOptions(false),
+                EnableTotalRecordCount = false,
+                ImageTypes = [ImageType.Primary],
+                Limit = 8,
+                OrderBy = [(ItemSortBy.Random, SortOrder.Ascending)]
+            }).Items.Select(i => i.Item).ToArray();
         }
 
         protected override bool Supports(BaseItem item)
@@ -96,6 +90,12 @@ namespace Emby.Server.Implementations.Images
             }
 
             return base.CreateImage(item, itemsWithImages, outputPath, imageType, imageIndex);
+        }
+
+        protected override bool HasChangedByDate(BaseItem item, ItemImageInfo image)
+        {
+            var age = DateTime.UtcNow - image.DateModified;
+            return age.TotalDays > 7;
         }
     }
 }

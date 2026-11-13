@@ -1,97 +1,96 @@
-using System;
 using System.ComponentModel.DataAnnotations;
-using System.Globalization;
+using System.Linq;
+using System.Threading.Tasks;
 using Jellyfin.Api.Constants;
-using MediaBrowser.Controller;
+using Jellyfin.Api.Models.ApiKeyDtos;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Controller.Security;
-using MediaBrowser.Controller.Session;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 
-namespace Jellyfin.Api.Controllers
+namespace Jellyfin.Api.Controllers;
+
+/// <summary>
+/// Authentication controller.
+/// </summary>
+[Route("Auth")]
+[Tags("Authentication")]
+public class ApiKeyController : BaseJellyfinApiController
 {
+    private readonly IAuthenticationManager _authenticationManager;
+
     /// <summary>
-    /// Authentication controller.
+    /// Initializes a new instance of the <see cref="ApiKeyController"/> class.
     /// </summary>
-    [Route("Auth")]
-    public class ApiKeyController : BaseJellyfinApiController
+    /// <param name="authenticationManager">Instance of <see cref="IAuthenticationManager"/> interface.</param>
+    public ApiKeyController(IAuthenticationManager authenticationManager)
     {
-        private readonly ISessionManager _sessionManager;
-        private readonly IServerApplicationHost _appHost;
-        private readonly IAuthenticationRepository _authRepo;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ApiKeyController"/> class.
-        /// </summary>
-        /// <param name="sessionManager">Instance of <see cref="ISessionManager"/> interface.</param>
-        /// <param name="appHost">Instance of <see cref="IServerApplicationHost"/> interface.</param>
-        /// <param name="authRepo">Instance of <see cref="IAuthenticationRepository"/> interface.</param>
-        public ApiKeyController(
-            ISessionManager sessionManager,
-            IServerApplicationHost appHost,
-            IAuthenticationRepository authRepo)
-        {
-            _sessionManager = sessionManager;
-            _appHost = appHost;
-            _authRepo = authRepo;
-        }
-
-        /// <summary>
-        /// Get all keys.
-        /// </summary>
-        /// <response code="200">Api keys retrieved.</response>
-        /// <returns>A <see cref="QueryResult{AuthenticationInfo}"/> with all keys.</returns>
-        [HttpGet("Keys")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QueryResult<AuthenticationInfo>> GetKeys()
-        {
-            var result = _authRepo.Get(new AuthenticationInfoQuery
-            {
-                HasUser = false
-            });
-
-            return result;
-        }
-
-        /// <summary>
-        /// Create a new api key.
-        /// </summary>
-        /// <param name="app">Name of the app using the authentication key.</param>
-        /// <response code="204">Api key created.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpPost("Keys")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult CreateKey([FromQuery, Required] string app)
-        {
-            _authRepo.Create(new AuthenticationInfo
-            {
-                AppName = app,
-                AccessToken = Guid.NewGuid().ToString("N", CultureInfo.InvariantCulture),
-                DateCreated = DateTime.UtcNow,
-                DeviceId = _appHost.SystemId,
-                DeviceName = _appHost.FriendlyName,
-                AppVersion = _appHost.ApplicationVersionString
-            });
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Remove an api key.
-        /// </summary>
-        /// <param name="key">The access token to delete.</param>
-        /// <response code="204">Api key deleted.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpDelete("Keys/{key}")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult RevokeKey([FromRoute, Required] string key)
-        {
-            _sessionManager.RevokeToken(key);
-            return NoContent();
-        }
+        _authenticationManager = authenticationManager;
     }
+
+    /// <summary>
+    /// Get all keys.
+    /// </summary>
+    /// <response code="200">Api keys retrieved.</response>
+    /// <returns>A <see cref="QueryResult{AuthenticationInfoDto}"/> with all keys.</returns>
+    [HttpGet("Keys")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<QueryResult<AuthenticationInfoDto>>> GetKeys()
+    {
+        var keys = await _authenticationManager.GetApiKeys().ConfigureAwait(false);
+
+        return new QueryResult<AuthenticationInfoDto>(keys.Select(ToDto).ToList());
+    }
+
+    /// <summary>
+    /// Create a new api key.
+    /// </summary>
+    /// <param name="app">Name of the app using the authentication key.</param>
+    /// <response code="200">Api key created.</response>
+    /// <returns>The created api key.</returns>
+    [HttpPost("Keys")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<AuthenticationInfoDto>> CreateKey([FromQuery, Required] string app)
+    {
+        var key = await _authenticationManager.CreateApiKey(app).ConfigureAwait(false);
+
+        return ToDto(key);
+    }
+
+    /// <summary>
+    /// Remove an api key.
+    /// </summary>
+    /// <param name="key">The access token to delete.</param>
+    /// <response code="204">Api key deleted.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpDelete("Keys/{key}")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<ActionResult> RevokeKey([FromRoute, Required] string key)
+    {
+        await _authenticationManager.DeleteApiKey(key).ConfigureAwait(false);
+
+        return NoContent();
+    }
+
+    private static AuthenticationInfoDto ToDto(AuthenticationInfo info)
+        => new()
+        {
+            Id = info.Id,
+            AccessToken = info.AccessToken,
+            DeviceId = info.DeviceId,
+            AppName = info.AppName,
+            AppVersion = info.AppVersion,
+            DeviceName = info.DeviceName,
+            UserId = info.UserId,
+            IsActive = info.IsActive,
+            DateCreated = info.DateCreated,
+            DateRevoked = info.DateRevoked,
+            DateLastActivity = info.DateLastActivity,
+            UserName = info.UserName
+        };
 }

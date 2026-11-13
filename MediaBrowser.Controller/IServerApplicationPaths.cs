@@ -2,6 +2,10 @@
 
 #pragma warning disable CS1591
 
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using MediaBrowser.Common.Configuration;
 
 namespace MediaBrowser.Controller
@@ -49,24 +53,6 @@ namespace MediaBrowser.Controller
         /// </summary>
         /// <value>The year path.</value>
         string YearPath { get; }
-
-        /// <summary>
-        /// Gets the path to the General IBN directory.
-        /// </summary>
-        /// <value>The general path.</value>
-        string GeneralPath { get; }
-
-        /// <summary>
-        /// Gets the path to the Ratings IBN directory.
-        /// </summary>
-        /// <value>The ratings path.</value>
-        string RatingsPath { get; }
-
-        /// <summary>
-        /// Gets the media info images path.
-        /// </summary>
-        /// <value>The media info images path.</value>
-        string MediaInfoImagesPath { get; }
 
         /// <summary>
         /// Gets the path to the user configuration directory.

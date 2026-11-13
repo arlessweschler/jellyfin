@@ -19,6 +19,7 @@ local.properties
 .classpath
 .settings/
 .loadpath
+*.lscache
 
 # External tool builders
 .externalToolBuilders/
@@ -150,8 +151,6 @@ publish/
 *.pubxml
 
 # NuGet Packages Directory
-## TODO: If you have NuGet Package Restore enabled, uncomment the next line
-# packages/
 dlls/
 dllssigned/
 
@@ -166,7 +165,6 @@ AppPackages/
 sql/
 *.Cache
 ClientBin/
-[Ss]tyle[Cc]op.*
 ~$*
 *~
 *.dbmdl
@@ -268,6 +266,7 @@ doc/
 # Deployment artifacts
 dist
 *.exe
+*.dll
 
 # BenchmarkDotNet artifacts
 BenchmarkDotNet.Artifacts
@@ -275,5 +274,11 @@ BenchmarkDotNet.Artifacts
 # Ignore web artifacts from native builds
 web/
 web-src.*
-MediaBrowser.WebDashboard/jellyfin-web
 apiclient/generated
+
+# Omnisharp crash logs
+mono_crash.*.json
+
+# Devcontainer temp files
+.devcontainer/devcontainer-lock.json
+dotnet/

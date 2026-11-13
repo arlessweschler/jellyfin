@@ -336,7 +336,7 @@
         "TwoLetterISORegionName": "IE"
     },
     {
-        "DisplayName": "Islamic Republic of Pakistan",
+        "DisplayName": "Pakistan",
         "Name": "PK",
         "ThreeLetterISORegionName": "PAK",
         "TwoLetterISORegionName": "PK"
@@ -630,7 +630,7 @@
         "TwoLetterISORegionName": "MD"
     },
     {
-        "DisplayName": "RÃ©union",
+        "DisplayName": "Réunion",
         "Name": "RE",
         "ThreeLetterISORegionName": "REU",
         "TwoLetterISORegionName": "RE"
@@ -696,7 +696,7 @@
         "TwoLetterISORegionName": "SI"
     },
     {
-        "DisplayName": "Soomaaliya",
+        "DisplayName": "Somalia",
         "Name": "SO",
         "ThreeLetterISORegionName": "SOM",
         "TwoLetterISORegionName": "SO"
@@ -748,6 +748,12 @@
         "Name": "TJ",
         "ThreeLetterISORegionName": "TAJ",
         "TwoLetterISORegionName": "TJ"
+    },
+    {
+        "DisplayName": "Tanzania",
+        "Name": "TZ",
+        "ThreeLetterISORegionName": "TZA",
+        "TwoLetterISORegionName": "TZ"
     },
     {
         "DisplayName": "Thailand",

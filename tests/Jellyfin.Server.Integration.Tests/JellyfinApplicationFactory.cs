@@ -1,17 +1,23 @@
 using System;
 using System.Collections.Concurrent;
+using System.Globalization;
 using System.IO;
-using System.Threading;
 using Emby.Server.Implementations;
-using Emby.Server.Implementations.IO;
+using Jellyfin.Server.Extensions;
+using Jellyfin.Server.Helpers;
+using Jellyfin.Server.ServerSetupApp;
 using MediaBrowser.Common;
+using MediaBrowser.Common.Configuration;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Serilog;
+using Serilog.Core;
 using Serilog.Extensions.Logging;
 
 namespace Jellyfin.Server.Integration.Tests
@@ -23,6 +29,7 @@ namespace Jellyfin.Server.Integration.Tests
     {
         private static readonly string _testPathRoot = Path.Combine(Path.GetTempPath(), "jellyfin-test-data");
         private readonly ConcurrentBag<IDisposable> _disposableComponents = new ConcurrentBag<IDisposable>();
+        private readonly string _webHostPathRoot;
 
         /// <summary>
         /// Initializes static members of the <see cref="JellyfinApplicationFactory"/> class.
@@ -30,27 +37,45 @@ namespace Jellyfin.Server.Integration.Tests
         static JellyfinApplicationFactory()
         {
             // Perform static initialization that only needs to happen once per test-run
-            Log.Logger = new LoggerConfiguration().WriteTo.Console().CreateLogger();
-            Program.PerformStaticInitialization();
+            Log.Logger = new LoggerConfiguration()
+                .WriteTo.Console(formatProvider: CultureInfo.InvariantCulture)
+                .CreateLogger();
+            StartupHelpers.PerformStaticInitialization();
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="JellyfinApplicationFactory"/> class using a new temporary directory.
+        /// </summary>
+        public JellyfinApplicationFactory()
+            : this(Path.Combine(_testPathRoot, "test-host-" + Path.GetFileNameWithoutExtension(Path.GetRandomFileName())))
+        {
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="JellyfinApplicationFactory"/> class.
+        /// </summary>
+        /// <param name="webHostPathRoot">The directory the application paths are created in. Reusing it starts the same server again.</param>
+        protected JellyfinApplicationFactory(string webHostPathRoot)
+        {
+            _webHostPathRoot = webHostPathRoot;
         }
 
         /// <inheritdoc/>
-        protected override IWebHostBuilder CreateWebHostBuilder()
+        protected override IHostBuilder CreateHostBuilder()
         {
-            return new WebHostBuilder();
+            return new HostBuilder();
         }
 
         /// <inheritdoc/>
         protected override void ConfigureWebHost(IWebHostBuilder builder)
         {
+            // Skip ffmpeg check for testing
+            Environment.SetEnvironmentVariable("JELLYFIN_FFMPEG__NOVALIDATION", "true");
             // Specify the startup command line options
-            var commandLineOpts = new StartupOptions
-            {
-                NoWebClient = true
-            };
+            var commandLineOpts = new StartupOptions();
 
             // Use a temporary directory for the application paths
-            var webHostPathRoot = Path.Combine(_testPathRoot, "test-host-" + Path.GetFileNameWithoutExtension(Path.GetRandomFileName()));
+            var webHostPathRoot = _webHostPathRoot;
             Directory.CreateDirectory(Path.Combine(webHostPathRoot, "logs"));
             Directory.CreateDirectory(Path.Combine(webHostPathRoot, "config"));
             Directory.CreateDirectory(Path.Combine(webHostPathRoot, "cache"));
@@ -64,13 +89,13 @@ namespace Jellyfin.Server.Integration.Tests
 
             // Create the logging config file
             // TODO: We shouldn't need to do this since we are only logging to console
-            Program.InitLoggingConfigFile(appPaths).GetAwaiter().GetResult();
+            StartupHelpers.InitLoggingConfigFile(appPaths).GetAwaiter().GetResult();
 
             // Create a copy of the application configuration to use for startup
             var startupConfig = Program.CreateAppConfiguration(commandLineOpts, appPaths);
 
             ILoggerFactory loggerFactory = new SerilogLoggerFactory();
-            var serviceCollection = new ServiceCollection();
+
             _disposableComponents.Add(loggerFactory);
 
             // Create the app host and initialize it
@@ -78,29 +103,41 @@ namespace Jellyfin.Server.Integration.Tests
                 appPaths,
                 loggerFactory,
                 commandLineOpts,
-                new ConfigurationBuilder().Build(),
-                new ManagedFileSystem(loggerFactory.CreateLogger<ManagedFileSystem>(), appPaths),
-                serviceCollection);
+                startupConfig);
             _disposableComponents.Add(appHost);
-            appHost.Init();
 
-            // Configure the web host builder
-            Program.ConfigureWebHostBuilder(builder, appHost, serviceCollection, commandLineOpts, startupConfig, appPaths);
+            builder.ConfigureServices(services => appHost.Init(services))
+                .ConfigureWebHostBuilder(appHost, startupConfig, appPaths, NullLogger.Instance)
+                .ConfigureAppConfiguration((context, builder) =>
+                {
+                    builder
+                        .SetBasePath(appPaths.ConfigurationDirectoryPath)
+                        .AddInMemoryCollection(ConfigurationOptions.DefaultConfiguration)
+                        .AddEnvironmentVariables("JELLYFIN_")
+                        .AddInMemoryCollection(commandLineOpts.ConvertToConfig());
+                })
+                .ConfigureServices(e => e
+                    .AddSingleton<IStartupLogger, NullStartupLogger<object>>()
+                    .AddTransient(typeof(IStartupLogger<>), typeof(NullStartupLogger<>))
+                    .AddSingleton(e));
         }
 
         /// <inheritdoc/>
-        protected override TestServer CreateServer(IWebHostBuilder builder)
+        protected override IHost CreateHost(IHostBuilder builder)
         {
-            // Create the test server using the base implementation
-            var testServer = base.CreateServer(builder);
+            var host = builder.Build();
+            var appHost = (TestAppHost)host.Services.GetRequiredService<IApplicationHost>();
+            appHost.ServiceProvider = host.Services;
+            var applicationPaths = appHost.ServiceProvider.GetRequiredService<IApplicationPaths>();
+            Program.ApplyStartupMigrationAsync((ServerApplicationPaths)applicationPaths, appHost.ServiceProvider.GetRequiredService<IConfiguration>(), new()).GetAwaiter().GetResult();
+            Program.ApplyCoreMigrationsAsync(appHost.ServiceProvider, Migrations.Stages.JellyfinMigrationStageTypes.CoreInitialisation).GetAwaiter().GetResult();
+            appHost.InitializeServices(Mock.Of<IConfiguration>()).GetAwaiter().GetResult();
+            Program.ApplyCoreMigrationsAsync(appHost.ServiceProvider, Migrations.Stages.JellyfinMigrationStageTypes.AppInitialisation).GetAwaiter().GetResult();
+            host.Start();
 
-            // Finish initializing the app host
-            var appHost = (TestAppHost)testServer.Services.GetRequiredService<IApplicationHost>();
-            appHost.ServiceProvider = testServer.Services;
-            appHost.InitializeServices().GetAwaiter().GetResult();
-            appHost.RunStartupTasksAsync(CancellationToken.None).GetAwaiter().GetResult();
+            appHost.RunStartupTasksAsync().GetAwaiter().GetResult();
 
-            return testServer;
+            return host;
         }
 
         /// <inheritdoc/>
@@ -114,6 +151,62 @@ namespace Jellyfin.Server.Integration.Tests
             _disposableComponents.Clear();
 
             base.Dispose(disposing);
+        }
+
+        private sealed class NullStartupLogger<TCategory> : IStartupLogger<TCategory>
+        {
+            public StartupLogTopic? Topic => throw new NotImplementedException();
+
+            public IStartupLogger BeginGroup(FormattableString logEntry)
+            {
+                return this;
+            }
+
+            public IStartupLogger<TCategory1> BeginGroup<TCategory1>(FormattableString logEntry)
+            {
+                return new NullStartupLogger<TCategory1>();
+            }
+
+            public IDisposable? BeginScope<TState>(TState state)
+                where TState : notnull
+            {
+                return NullLogger.Instance.BeginScope(state);
+            }
+
+            public bool IsEnabled(LogLevel logLevel)
+            {
+                return NullLogger.Instance.IsEnabled(logLevel);
+            }
+
+            public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+            {
+                NullLogger.Instance.Log(logLevel, eventId, state, exception, formatter);
+            }
+
+            public Microsoft.Extensions.Logging.ILogger With(Microsoft.Extensions.Logging.ILogger logger)
+            {
+                return this;
+            }
+
+            public IStartupLogger<TCategory1> With<TCategory1>(Microsoft.Extensions.Logging.ILogger logger)
+            {
+                return new NullStartupLogger<TCategory1>();
+            }
+
+            IStartupLogger<TCategory> IStartupLogger<TCategory>.BeginGroup(FormattableString logEntry)
+            {
+                return new NullStartupLogger<TCategory>();
+            }
+
+            IStartupLogger IStartupLogger.With(Microsoft.Extensions.Logging.ILogger logger)
+            {
+                return this;
+            }
+
+            IStartupLogger<TCategory> IStartupLogger<TCategory>.With(Microsoft.Extensions.Logging.ILogger logger)
+            {
+                return this;
+            }
         }
     }
 }

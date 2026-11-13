@@ -2,6 +2,7 @@
 
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 
 namespace MediaBrowser.Controller.Library
@@ -23,12 +24,6 @@ namespace MediaBrowser.Controller.Library
         /// <param name="item">The item.</param>
         /// <param name="user">The user.</param>
         /// <returns>IEnumerable{System.String}.</returns>
-        Task<IEnumerable<IntroInfo>> GetIntros(BaseItem item, Jellyfin.Data.Entities.User user);
-
-        /// <summary>
-        /// Gets all intro files.
-        /// </summary>
-        /// <returns>IEnumerable{System.String}.</returns>
-        IEnumerable<string> GetAllIntroFiles();
+        Task<IEnumerable<IntroInfo>> GetIntros(BaseItem item, User user);
     }
 }

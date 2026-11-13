@@ -1,4 +1,4 @@
-﻿#nullable disable
+#nullable disable
 
 #pragma warning disable CS1591
 
@@ -10,6 +10,15 @@ namespace MediaBrowser.Controller.MediaEncoding
 {
     public class BaseEncodingJobOptions
     {
+        public BaseEncodingJobOptions()
+        {
+            EnableAutoStreamCopy = true;
+            AllowVideoStreamCopy = true;
+            AllowAudioStreamCopy = true;
+            Context = EncodingContext.Streaming;
+            StreamOptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
         /// <summary>
         /// Gets or sets the id.
         /// </summary>
@@ -33,8 +42,6 @@ namespace MediaBrowser.Controller.MediaEncoding
         public bool AllowVideoStreamCopy { get; set; }
 
         public bool AllowAudioStreamCopy { get; set; }
-
-        public bool BreakOnNonKeyFrames { get; set; }
 
         /// <summary>
         /// Gets or sets the audio sample rate.
@@ -67,10 +74,28 @@ namespace MediaBrowser.Controller.MediaEncoding
         public string Profile { get; set; }
 
         /// <summary>
+        /// Gets or sets the video range type.
+        /// </summary>
+        /// <value>The video range type.</value>
+        public string VideoRangeType { get; set; }
+
+        /// <summary>
         /// Gets or sets the level.
         /// </summary>
         /// <value>The level.</value>
         public string Level { get; set; }
+
+        /// <summary>
+        /// Gets or sets the codec tag.
+        /// </summary>
+        /// <value>The codec tag.</value>
+        public string CodecTag { get; set; }
+
+        /// <summary>
+        /// Gets or sets the rotation.
+        /// </summary>
+        /// <value>The video rotation angle, usually 0 or +-90/180.</value>
+        public string Rotation { get; set; }
 
         /// <summary>
         /// Gets or sets the framerate.
@@ -170,6 +195,10 @@ namespace MediaBrowser.Controller.MediaEncoding
 
         public Dictionary<string, string> StreamOptions { get; set; }
 
+        public bool EnableAudioVbrEncoding { get; set; }
+
+        public bool AlwaysBurnInSubtitleWhenTranscoding { get; set; }
+
         public string GetOption(string qualifier, string name)
         {
             var value = GetOption(qualifier + "-" + name);
@@ -190,15 +219,6 @@ namespace MediaBrowser.Controller.MediaEncoding
             }
 
             return null;
-        }
-
-        public BaseEncodingJobOptions()
-        {
-            EnableAutoStreamCopy = true;
-            AllowVideoStreamCopy = true;
-            AllowAudioStreamCopy = true;
-            Context = EncodingContext.Streaming;
-            StreamOptions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
     }
 }

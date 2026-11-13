@@ -1,14 +1,14 @@
 #nullable disable
 
-#pragma warning disable CS1591
+#pragma warning disable CA1002, CS1591
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.LiveTv;
 using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
@@ -29,49 +29,58 @@ namespace MediaBrowser.Controller.Library
         /// </summary>
         /// <param name="itemId">The item identifier.</param>
         /// <returns>IEnumerable&lt;MediaStream&gt;.</returns>
-        List<MediaStream> GetMediaStreams(Guid itemId);
-
-        /// <summary>
-        /// Gets the media streams.
-        /// </summary>
-        /// <param name="mediaSourceId">The media source identifier.</param>
-        /// <returns>IEnumerable&lt;MediaStream&gt;.</returns>
-        List<MediaStream> GetMediaStreams(string mediaSourceId);
+        IReadOnlyList<MediaStream> GetMediaStreams(Guid itemId);
 
         /// <summary>
         /// Gets the media streams.
         /// </summary>
         /// <param name="query">The query.</param>
         /// <returns>IEnumerable&lt;MediaStream&gt;.</returns>
-        List<MediaStream> GetMediaStreams(MediaStreamQuery query);
+        IReadOnlyList<MediaStream> GetMediaStreams(MediaStreamQuery query);
 
         /// <summary>
         /// Gets the media attachments.
         /// </summary>
         /// <param name="itemId">The item identifier.</param>
         /// <returns>IEnumerable&lt;MediaAttachment&gt;.</returns>
-        List<MediaAttachment> GetMediaAttachments(Guid itemId);
+        IReadOnlyList<MediaAttachment> GetMediaAttachments(Guid itemId);
 
         /// <summary>
         /// Gets the media attachments.
         /// </summary>
         /// <param name="query">The query.</param>
         /// <returns>IEnumerable&lt;MediaAttachment&gt;.</returns>
-        List<MediaAttachment> GetMediaAttachments(MediaAttachmentQuery query);
+        IReadOnlyList<MediaAttachment> GetMediaAttachments(MediaAttachmentQuery query);
 
         /// <summary>
-        /// Gets the playack media sources.
+        /// Gets the playback media sources.
         /// </summary>
-        Task<List<MediaSourceInfo>> GetPlaybackMediaSources(BaseItem item, User user, bool allowMediaProbe, bool enablePathSubstitution, CancellationToken cancellationToken);
+        /// <param name="item">Item to use.</param>
+        /// <param name="user">User to use for operation.</param>
+        /// <param name="allowMediaProbe">Option to allow media probe.</param>
+        /// <param name="enablePathSubstitution">Option to enable path substitution.</param>
+        /// <param name="cancellationToken">CancellationToken to use for operation.</param>
+        /// <returns>List of media sources wrapped in an awaitable task.</returns>
+        Task<IReadOnlyList<MediaSourceInfo>> GetPlaybackMediaSources(BaseItem item, User user, bool allowMediaProbe, bool enablePathSubstitution, CancellationToken cancellationToken);
 
         /// <summary>
         /// Gets the static media sources.
         /// </summary>
-        List<MediaSourceInfo> GetStaticMediaSources(BaseItem item, bool enablePathSubstitution, User user = null);
+        /// <param name="item">Item to use.</param>
+        /// <param name="enablePathSubstitution">Option to enable path substitution.</param>
+        /// <param name="user">User to use for operation.</param>
+        /// <returns>List of media sources.</returns>
+        IReadOnlyList<MediaSourceInfo> GetStaticMediaSources(BaseItem item, bool enablePathSubstitution, User user = null);
 
         /// <summary>
         /// Gets the static media source.
         /// </summary>
+        /// <param name="item">Item to use.</param>
+        /// <param name="mediaSourceId">Media source to get.</param>
+        /// <param name="liveStreamId">Live stream to use.</param>
+        /// <param name="enablePathSubstitution">Option to enable path substitution.</param>
+        /// <param name="cancellationToken">CancellationToken to use for operation.</param>
+        /// <returns>The static media source wrapped in an awaitable task.</returns>
         Task<MediaSourceInfo> GetMediaSource(BaseItem item, string mediaSourceId, string liveStreamId, bool enablePathSubstitution, CancellationToken cancellationToken);
 
         /// <summary>
@@ -95,6 +104,28 @@ namespace MediaBrowser.Controller.Library
         Task<Tuple<MediaSourceInfo, IDirectStreamProvider>> GetLiveStreamWithDirectStreamProvider(string id, CancellationToken cancellationToken);
 
         /// <summary>
+        /// Gets the live stream info.
+        /// </summary>
+        /// <param name="id">The identifier.</param>
+        /// <returns>An instance of <see cref="ILiveStream"/>.</returns>
+        public ILiveStream GetLiveStreamInfo(string id);
+
+        /// <summary>
+        /// Gets the live stream info using the stream's unique id.
+        /// </summary>
+        /// <param name="uniqueId">The unique identifier.</param>
+        /// <returns>An instance of <see cref="ILiveStream"/>.</returns>
+        public ILiveStream GetLiveStreamInfoByUniqueId(string uniqueId);
+
+        /// <summary>
+        /// Gets the media sources for an active recording.
+        /// </summary>
+        /// <param name="info">The <see cref="ActiveRecordingInfo"/>.</param>
+        /// <param name="cancellationToken">The <see cref="CancellationToken"/>.</param>
+        /// <returns>A task containing the <see cref="MediaSourceInfo"/>'s for the recording.</returns>
+        Task<IReadOnlyList<MediaSourceInfo>> GetRecordingStreamMediaSources(ActiveRecordingInfo info, CancellationToken cancellationToken);
+
+        /// <summary>
         /// Closes the media source.
         /// </summary>
         /// <param name="id">The live stream identifier.</param>
@@ -107,17 +138,8 @@ namespace MediaBrowser.Controller.Library
 
         MediaProtocol GetPathProtocol(string path);
 
-        void SetDefaultAudioAndSubtitleStreamIndexes(BaseItem item, MediaSourceInfo source, User user);
+        void SetDefaultAudioAndSubtitleStreamIndices(BaseItem item, MediaSourceInfo source, User user);
 
         Task AddMediaInfoWithProbe(MediaSourceInfo mediaSource, bool isAudio, string cacheKey, bool addProbeDelay, bool isLiveStream, CancellationToken cancellationToken);
-
-        Task<IDirectStreamProvider> GetDirectStreamProviderByUniqueId(string uniqueId, CancellationToken cancellationToken);
-    }
-
-    public interface IDirectStreamProvider
-    {
-        Task CopyToAsync(Stream stream, CancellationToken cancellationToken);
-
-        string GetFilePath();
     }
 }

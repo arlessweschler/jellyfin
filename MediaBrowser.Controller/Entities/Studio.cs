@@ -5,7 +5,7 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using MediaBrowser.Controller.Extensions;
+using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities
@@ -13,21 +13,9 @@ namespace MediaBrowser.Controller.Entities
     /// <summary>
     /// Class Studio.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class Studio : BaseItem, IItemByName
     {
-        public override List<string> GetUserDataKeys()
-        {
-            var list = base.GetUserDataKeys();
-
-            list.Insert(0, GetType().Name + "-" + (Name ?? string.Empty).RemoveDiacritics());
-            return list;
-        }
-
-        public override string CreatePresentationUniqueKey()
-        {
-            return GetUserDataKeys()[0];
-        }
-
         /// <summary>
         /// Gets the folder containing the item.
         /// If the item is a folder, it returns the folder itself.
@@ -41,6 +29,22 @@ namespace MediaBrowser.Controller.Entities
 
         [JsonIgnore]
         public override bool SupportsAncestors => false;
+
+        [JsonIgnore]
+        public override bool SupportsPeople => false;
+
+        public override List<string> GetUserDataKeys()
+        {
+            var list = base.GetUserDataKeys();
+
+            list.Insert(0, GetType().Name + "-" + (Name ?? string.Empty).RemoveDiacritics());
+            return list;
+        }
+
+        public override string CreatePresentationUniqueKey()
+        {
+            return GetUserDataKeys()[0];
+        }
 
         public override double GetDefaultPrimaryImageAspectRatio()
         {
@@ -60,15 +64,12 @@ namespace MediaBrowser.Controller.Entities
             return true;
         }
 
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.StudioIds = new[] { Id };
 
             return LibraryManager.GetItemList(query);
         }
-
-        [JsonIgnore]
-        public override bool SupportsPeople => false;
 
         public static string GetPath(string name)
         {
@@ -77,10 +78,7 @@ namespace MediaBrowser.Controller.Entities
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validName = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validName = normalizeName ? GetItemByNameFolderName(name) : name;
 
             return System.IO.Path.Combine(ConfigurationManager.ApplicationPaths.StudioPath, validName);
         }
@@ -105,6 +103,8 @@ namespace MediaBrowser.Controller.Entities
         /// <summary>
         /// This is called before any metadata refresh and returns true or false indicating if changes were made.
         /// </summary>
+        /// <param name="replaceAllMetadata"><c>true</c> to replace all metadata, <c>false</c> to not.</param>
+        /// <returns><c>true</c> if changes were made, <c>false</c> if not.</returns>
         public override bool BeforeMetadataRefresh(bool replaceAllMetadata)
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);

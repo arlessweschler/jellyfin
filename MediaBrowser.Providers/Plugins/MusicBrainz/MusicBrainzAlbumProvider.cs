@@ -1,770 +1,333 @@
-#pragma warning disable CS1591
-
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
-using System.Globalization;
-using System.IO;
 using System.Linq;
-using System.Net;
 using System.Net.Http;
-using System.Text;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Xml;
-using MediaBrowser.Common;
-using MediaBrowser.Common.Net;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Providers;
-using MediaBrowser.Providers.Plugins.MusicBrainz;
+using MediaBrowser.Providers.Music;
+using MetaBrainz.MusicBrainz;
+using MetaBrainz.MusicBrainz.Interfaces.Entities;
+using MetaBrainz.MusicBrainz.Interfaces.Searches;
 using Microsoft.Extensions.Logging;
 
-namespace MediaBrowser.Providers.Music
+namespace MediaBrowser.Providers.Plugins.MusicBrainz;
+
+/// <summary>
+/// Music album metadata provider for MusicBrainz.
+/// </summary>
+public class MusicBrainzAlbumProvider : IRemoteMetadataProvider<MusicAlbum, AlbumInfo>, IHasOrder
 {
-    public class MusicBrainzAlbumProvider : IRemoteMetadataProvider<MusicAlbum, AlbumInfo>, IHasOrder
+    private readonly ILogger<MusicBrainzAlbumProvider> _logger;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MusicBrainzAlbumProvider"/> class.
+    /// </summary>
+    /// <param name="logger">The logger.</param>
+    public MusicBrainzAlbumProvider(ILogger<MusicBrainzAlbumProvider> logger)
     {
-        /// <summary>
-        /// For each single MB lookup/search, this is the maximum number of
-        /// attempts that shall be made whilst receiving a 503 Server
-        /// Unavailable (indicating throttled) response.
-        /// </summary>
-        private const uint MusicBrainzQueryAttempts = 5u;
+        _logger = logger;
+    }
 
-        /// <summary>
-        /// The Jellyfin user-agent is unrestricted but source IP must not exceed
-        /// one request per second, therefore we rate limit to avoid throttling.
-        /// Be prudent, use a value slightly above the minimun required.
-        /// https://musicbrainz.org/doc/XML_Web_Service/Rate_Limiting
-        /// </summary>
-        private readonly long _musicBrainzQueryIntervalMs;
+    /// <inheritdoc />
+    public string Name => "MusicBrainz";
 
-        private readonly IHttpClientFactory _httpClientFactory;
-        private readonly IApplicationHost _appHost;
-        private readonly ILogger<MusicBrainzAlbumProvider> _logger;
+    /// <inheritdoc />
+    public int Order => 0;
 
-        private readonly string _musicBrainzBaseUrl;
+    /// <inheritdoc />
+    public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(AlbumInfo searchInfo, CancellationToken cancellationToken)
+    {
+        var query = MusicBrainz.Plugin.Instance!.MusicBrainzQuery;
+        var releaseId = MusicBrainzQueryExtensions.ParseMusicBrainzId(searchInfo.GetReleaseId(), "release", _logger);
+        var releaseGroupId = MusicBrainzQueryExtensions.ParseMusicBrainzId(searchInfo.GetReleaseGroupId(), "release group", _logger);
 
-        private SemaphoreSlim _apiRequestLock = new SemaphoreSlim(1, 1);
-        private Stopwatch _stopWatchMusicBrainz = new Stopwatch();
-
-        public MusicBrainzAlbumProvider(
-            IHttpClientFactory httpClientFactory,
-            IApplicationHost appHost,
-            ILogger<MusicBrainzAlbumProvider> logger)
+        if (releaseId is not null)
         {
-            _httpClientFactory = httpClientFactory;
-            _appHost = appHost;
-            _logger = logger;
-
-            _musicBrainzBaseUrl = Plugin.Instance.Configuration.Server;
-            _musicBrainzQueryIntervalMs = Plugin.Instance.Configuration.RateLimit;
-
-            // Use a stopwatch to ensure we don't exceed the MusicBrainz rate limit
-            _stopWatchMusicBrainz.Start();
-
-            Current = this;
+            var releaseResult = await query.LookupReleaseOrNullAsync(releaseId.Value, Include.Artists | Include.ReleaseGroups, _logger, cancellationToken).ConfigureAwait(false);
+            if (releaseResult is not null)
+            {
+                return GetReleaseResult(releaseResult).SingleItemAsEnumerable();
+            }
         }
 
-        internal static MusicBrainzAlbumProvider Current { get; private set; }
-
-        /// <inheritdoc />
-        public string Name => "MusicBrainz";
-
-        /// <inheritdoc />
-        public int Order => 0;
-
-        /// <inheritdoc />
-        public async Task<IEnumerable<RemoteSearchResult>> GetSearchResults(AlbumInfo searchInfo, CancellationToken cancellationToken)
+        if (releaseGroupId is not null)
         {
-            var releaseId = searchInfo.GetReleaseId();
-            var releaseGroupId = searchInfo.GetReleaseGroupId();
-
-            string url;
-
-            if (!string.IsNullOrEmpty(releaseId))
+            var releaseGroupResult = await query.LookupReleaseGroupOrNullAsync(releaseGroupId.Value, Include.Releases, _logger, cancellationToken).ConfigureAwait(false);
+            if (releaseGroupResult is not null)
             {
-                url = "/ws/2/release/?query=reid:" + releaseId.ToString(CultureInfo.InvariantCulture);
+                // No need to pass the cancellation token to GetReleaseGroupResultAsync as we're already passing it to ToBlockingEnumerable
+                return GetReleaseGroupResultAsync(releaseGroupResult.Releases, CancellationToken.None).ToBlockingEnumerable(cancellationToken);
             }
-            else if (!string.IsNullOrEmpty(releaseGroupId))
-            {
-                url = "/ws/2/release?release-group=" + releaseGroupId.ToString(CultureInfo.InvariantCulture);
-            }
-            else
-            {
-                var artistMusicBrainzId = searchInfo.GetMusicBrainzArtistId();
-
-                if (!string.IsNullOrWhiteSpace(artistMusicBrainzId))
-                {
-                    url = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "/ws/2/release/?query=\"{0}\" AND arid:{1}",
-                        WebUtility.UrlEncode(searchInfo.Name),
-                        artistMusicBrainzId);
-                }
-                else
-                {
-                    // I'm sure there is a better way but for now it resolves search for 12" Mixes
-                    var queryName = searchInfo.Name.Replace("\"", string.Empty, StringComparison.Ordinal);
-
-                    url = string.Format(
-                        CultureInfo.InvariantCulture,
-                        "/ws/2/release/?query=\"{0}\" AND artist:\"{1}\"",
-                        WebUtility.UrlEncode(queryName),
-                        WebUtility.UrlEncode(searchInfo.GetAlbumArtist()));
-                }
-            }
-
-            if (!string.IsNullOrWhiteSpace(url))
-            {
-                using var response = await GetMusicBrainzResponse(url, cancellationToken).ConfigureAwait(false);
-                await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-                return GetResultsFromResponse(stream);
-            }
-
-            return Enumerable.Empty<RemoteSearchResult>();
         }
 
-        private IEnumerable<RemoteSearchResult> GetResultsFromResponse(Stream stream)
+        var artistMusicBrainzId = searchInfo.GetMusicBrainzArtistId();
+
+        if (!string.IsNullOrWhiteSpace(artistMusicBrainzId))
         {
-            using var oReader = new StreamReader(stream, Encoding.UTF8);
-            var settings = new XmlReaderSettings()
-            {
-                ValidationType = ValidationType.None,
-                CheckCharacters = false,
-                IgnoreProcessingInstructions = true,
-                IgnoreComments = true
-            };
+            var releaseSearchResults = await query.FindReleasesWithRetryAsync($"\"{searchInfo.Name}\" AND arid:{artistMusicBrainzId}", _logger, cancellationToken)
+                .ConfigureAwait(false);
 
-            using var reader = XmlReader.Create(oReader, settings);
-            var results = ReleaseResult.Parse(reader);
-
-            return results.Select(i =>
+            if (releaseSearchResults.Results.Count > 0)
             {
-                var result = new RemoteSearchResult
+                return GetReleaseSearchResult(releaseSearchResults.Results);
+            }
+        }
+        else
+        {
+            // I'm sure there is a better way but for now it resolves search for 12" Mixes
+            var queryName = searchInfo.Name.Replace("\"", string.Empty, StringComparison.Ordinal);
+
+            var releaseSearchResults = await query.FindReleasesWithRetryAsync($"\"{queryName}\" AND artist:\"{searchInfo.GetAlbumArtist()}\"c", _logger, cancellationToken)
+                .ConfigureAwait(false);
+
+            if (releaseSearchResults.Results.Count > 0)
+            {
+                return GetReleaseSearchResult(releaseSearchResults.Results);
+            }
+        }
+
+        return Enumerable.Empty<RemoteSearchResult>();
+    }
+
+    private IEnumerable<RemoteSearchResult> GetReleaseSearchResult(IEnumerable<ISearchResult<IRelease>>? releaseSearchResults)
+    {
+        if (releaseSearchResults is null)
+        {
+            yield break;
+        }
+
+        foreach (var result in releaseSearchResults)
+        {
+            yield return GetReleaseResult(result.Item);
+        }
+    }
+
+    private async IAsyncEnumerable<RemoteSearchResult> GetReleaseGroupResultAsync(IEnumerable<IRelease>? releaseSearchResults, [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        if (releaseSearchResults is null)
+        {
+            yield break;
+        }
+
+        var query = MusicBrainz.Plugin.Instance!.MusicBrainzQuery;
+        foreach (var result in releaseSearchResults)
+        {
+            // Fetch full release info, otherwise artists are missing
+            var fullResult = await query.LookupReleaseOrNullAsync(result.Id, Include.Artists | Include.ReleaseGroups, _logger, cancellationToken).ConfigureAwait(false);
+            if (fullResult is not null)
+            {
+                yield return GetReleaseResult(fullResult);
+            }
+        }
+    }
+
+    private RemoteSearchResult GetReleaseResult(IRelease releaseSearchResult)
+    {
+        var searchResult = new RemoteSearchResult
+        {
+            Name = releaseSearchResult.Title,
+            ProductionYear = releaseSearchResult.Date?.Year,
+            PremiereDate = releaseSearchResult.Date?.NearestDate,
+            SearchProviderName = Name
+        };
+
+        // Add artists and use first as album artist
+        var artists = releaseSearchResult.ArtistCredit;
+        if (artists is not null && artists.Count > 0)
+        {
+            var artistResults = new RemoteSearchResult[artists.Count];
+            for (int i = 0; i < artists.Count; i++)
+            {
+                var artist = artists[i];
+                var artistResult = new RemoteSearchResult
                 {
-                    Name = i.Title,
-                    ProductionYear = i.Year
+                    Name = artist.Name
                 };
 
-                if (i.Artists.Count > 0)
+                if (artist.Artist?.Id is not null)
                 {
-                    result.AlbumArtist = new RemoteSearchResult
-                    {
-                        SearchProviderName = Name,
-                        Name = i.Artists[0].Item1
-                    };
-
-                    result.AlbumArtist.SetProviderId(MetadataProvider.MusicBrainzArtist, i.Artists[0].Item2);
+                    artistResult.SetProviderId(MetadataProvider.MusicBrainzArtist, artist.Artist!.Id.ToString());
                 }
 
-                if (!string.IsNullOrWhiteSpace(i.ReleaseId))
-                {
-                    result.SetProviderId(MetadataProvider.MusicBrainzAlbum, i.ReleaseId);
-                }
+                artistResults[i] = artistResult;
+            }
 
-                if (!string.IsNullOrWhiteSpace(i.ReleaseGroupId))
-                {
-                    result.SetProviderId(MetadataProvider.MusicBrainzReleaseGroup, i.ReleaseGroupId);
-                }
-
-                return result;
-            });
+            searchResult.AlbumArtist = artistResults[0];
+            searchResult.Artists = artistResults;
         }
 
-        /// <inheritdoc />
-        public async Task<MetadataResult<MusicAlbum>> GetMetadata(AlbumInfo id, CancellationToken cancellationToken)
+        searchResult.SetProviderId(MetadataProvider.MusicBrainzAlbum, releaseSearchResult.Id.ToString());
+
+        if (releaseSearchResult.ReleaseGroup?.Id is not null)
         {
-            var releaseId = id.GetReleaseId();
-            var releaseGroupId = id.GetReleaseGroupId();
+            searchResult.SetProviderId(MetadataProvider.MusicBrainzReleaseGroup, releaseSearchResult.ReleaseGroup.Id.ToString());
+        }
 
-            var result = new MetadataResult<MusicAlbum>
-            {
-                Item = new MusicAlbum()
-            };
+        return searchResult;
+    }
 
-            // If we have a release group Id but not a release Id...
-            if (string.IsNullOrWhiteSpace(releaseId) && !string.IsNullOrWhiteSpace(releaseGroupId))
+    /// <inheritdoc />
+    public async Task<MetadataResult<MusicAlbum>> GetMetadata(AlbumInfo info, CancellationToken cancellationToken)
+    {
+        var query = MusicBrainz.Plugin.Instance!.MusicBrainzQuery;
+        var releaseId = MusicBrainzQueryExtensions.ParseMusicBrainzId(info.GetReleaseId(), "release", _logger);
+        var releaseGroupId = MusicBrainzQueryExtensions.ParseMusicBrainzId(info.GetReleaseGroupId(), "release group", _logger);
+
+        var result = new MetadataResult<MusicAlbum>
+        {
+            Item = new MusicAlbum()
+        };
+
+        // If there is a release group, but no release ID, try to match the release
+        if (releaseId is null && releaseGroupId is not null)
+        {
+            // TODO: Actually try to match the release. Simply taking the first result is stupid.
+            var releaseGroupLookup = await query.LookupReleaseGroupOrNullAsync(releaseGroupId.Value, Include.None, _logger, cancellationToken).ConfigureAwait(false);
+            releaseId = releaseGroupLookup?.Releases?.Count > 0 ? releaseGroupLookup.Releases[0].Id : null;
+        }
+
+        // If there is no release ID, lookup a release with the info we have
+        if (releaseId is null)
+        {
+            var artistMusicBrainzId = info.GetMusicBrainzArtistId();
+            IRelease? releaseResult = null;
+
+            if (!string.IsNullOrEmpty(artistMusicBrainzId))
             {
-                releaseId = await GetReleaseIdFromReleaseGroupId(releaseGroupId, cancellationToken).ConfigureAwait(false);
-                result.HasMetadata = true;
+                var releaseSearchResults = await query.FindReleasesWithRetryAsync($"\"{info.Name}\" AND arid:{artistMusicBrainzId}", _logger, cancellationToken)
+                    .ConfigureAwait(false);
+                releaseResult = releaseSearchResults.Results.Count > 0 ? releaseSearchResults.Results[0].Item : null;
+            }
+            else if (!string.IsNullOrEmpty(info.GetAlbumArtist()))
+            {
+                var releaseSearchResults = await query.FindReleasesWithRetryAsync($"\"{info.Name}\" AND artist:{info.GetAlbumArtist()}", _logger, cancellationToken)
+                    .ConfigureAwait(false);
+                releaseResult = releaseSearchResults.Results.Count > 0 ? releaseSearchResults.Results[0].Item : null;
             }
 
-            if (string.IsNullOrWhiteSpace(releaseId))
+            if (releaseResult is not null)
             {
-                var artistMusicBrainzId = id.GetMusicBrainzArtistId();
+                releaseId = releaseResult.Id;
 
-                var releaseResult = await GetReleaseResult(artistMusicBrainzId, id.GetAlbumArtist(), id.Name, cancellationToken).ConfigureAwait(false);
-
-                if (releaseResult != null)
+                if (releaseResult.ReleaseGroup?.Id is not null)
                 {
-                    if (!string.IsNullOrWhiteSpace(releaseResult.ReleaseId))
-                    {
-                        releaseId = releaseResult.ReleaseId;
-                        result.HasMetadata = true;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(releaseResult.ReleaseGroupId))
-                    {
-                        releaseGroupId = releaseResult.ReleaseGroupId;
-                        result.HasMetadata = true;
-                    }
-
-                    result.Item.ProductionYear = releaseResult.Year;
-                    result.Item.Overview = releaseResult.Overview;
+                    releaseGroupId = releaseResult.ReleaseGroup.Id;
                 }
             }
+        }
 
-            // If we have a release Id but not a release group Id...
-            if (!string.IsNullOrWhiteSpace(releaseId) && string.IsNullOrWhiteSpace(releaseGroupId))
-            {
-                releaseGroupId = await GetReleaseGroupFromReleaseId(releaseId, cancellationToken).ConfigureAwait(false);
-                result.HasMetadata = true;
-            }
-
-            if (!string.IsNullOrWhiteSpace(releaseId) || !string.IsNullOrWhiteSpace(releaseGroupId))
-            {
-                result.HasMetadata = true;
-            }
-
-            if (result.HasMetadata)
-            {
-                if (!string.IsNullOrEmpty(releaseId))
-                {
-                    result.Item.SetProviderId(MetadataProvider.MusicBrainzAlbum, releaseId);
-                }
-
-                if (!string.IsNullOrEmpty(releaseGroupId))
-                {
-                    result.Item.SetProviderId(MetadataProvider.MusicBrainzReleaseGroup, releaseGroupId);
-                }
-            }
-
+        if (releaseId is null && releaseGroupId is null)
+        {
             return result;
         }
 
-        private Task<ReleaseResult> GetReleaseResult(string artistMusicBrainId, string artistName, string albumName, CancellationToken cancellationToken)
+        // Fetch the full release (and its release group) so we can populate everything MusicBrainz returns.
+        IRelease? release = null;
+        if (releaseId is not null)
         {
-            if (!string.IsNullOrEmpty(artistMusicBrainId))
+            release = await query.LookupReleaseOrNullAsync(
+                releaseId.Value,
+                Include.Artists | Include.ReleaseGroups | Include.Labels | Include.Genres | Include.Tags,
+                _logger,
+                cancellationToken).ConfigureAwait(false);
+
+            if (releaseGroupId is null && release?.ReleaseGroup?.Id is not null)
             {
-                return GetReleaseResult(albumName, artistMusicBrainId, cancellationToken);
-            }
-
-            if (string.IsNullOrWhiteSpace(artistName))
-            {
-                return Task.FromResult(new ReleaseResult());
-            }
-
-            return GetReleaseResultByArtistName(albumName, artistName, cancellationToken);
-        }
-
-        private async Task<ReleaseResult> GetReleaseResult(string albumName, string artistId, CancellationToken cancellationToken)
-        {
-            var url = string.Format(
-                CultureInfo.InvariantCulture,
-                "/ws/2/release/?query=\"{0}\" AND arid:{1}",
-                WebUtility.UrlEncode(albumName),
-                artistId);
-
-            using var response = await GetMusicBrainzResponse(url, cancellationToken).ConfigureAwait(false);
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var oReader = new StreamReader(stream, Encoding.UTF8);
-            var settings = new XmlReaderSettings
-            {
-                ValidationType = ValidationType.None,
-                CheckCharacters = false,
-                IgnoreProcessingInstructions = true,
-                IgnoreComments = true
-            };
-
-            using var reader = XmlReader.Create(oReader, settings);
-            return ReleaseResult.Parse(reader).FirstOrDefault();
-        }
-
-        private async Task<ReleaseResult> GetReleaseResultByArtistName(string albumName, string artistName, CancellationToken cancellationToken)
-        {
-            var url = string.Format(
-                CultureInfo.InvariantCulture,
-                "/ws/2/release/?query=\"{0}\" AND artist:\"{1}\"",
-                WebUtility.UrlEncode(albumName),
-                WebUtility.UrlEncode(artistName));
-
-            using var response = await GetMusicBrainzResponse(url, cancellationToken).ConfigureAwait(false);
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var oReader = new StreamReader(stream, Encoding.UTF8);
-            var settings = new XmlReaderSettings()
-            {
-                ValidationType = ValidationType.None,
-                CheckCharacters = false,
-                IgnoreProcessingInstructions = true,
-                IgnoreComments = true
-            };
-
-            using var reader = XmlReader.Create(oReader, settings);
-            return ReleaseResult.Parse(reader).FirstOrDefault();
-        }
-
-        private class ReleaseResult
-        {
-            public string ReleaseId;
-            public string ReleaseGroupId;
-            public string Title;
-            public string Overview;
-            public int? Year;
-
-            public List<ValueTuple<string, string>> Artists = new List<ValueTuple<string, string>>();
-
-            public static IEnumerable<ReleaseResult> Parse(XmlReader reader)
-            {
-                reader.MoveToContent();
-                reader.Read();
-
-                // Loop through each element
-                while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-                {
-                    if (reader.NodeType == XmlNodeType.Element)
-                    {
-                        switch (reader.Name)
-                        {
-                            case "release-list":
-                                {
-                                    if (reader.IsEmptyElement)
-                                    {
-                                        reader.Read();
-                                        continue;
-                                    }
-
-                                    using var subReader = reader.ReadSubtree();
-                                    return ParseReleaseList(subReader).ToList();
-                                }
-
-                            default:
-                                {
-                                    reader.Skip();
-                                    break;
-                                }
-                        }
-                    }
-                    else
-                    {
-                        reader.Read();
-                    }
-                }
-
-                return Enumerable.Empty<ReleaseResult>();
-            }
-
-            private static IEnumerable<ReleaseResult> ParseReleaseList(XmlReader reader)
-            {
-                reader.MoveToContent();
-                reader.Read();
-
-                // Loop through each element
-                while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-                {
-                    if (reader.NodeType == XmlNodeType.Element)
-                    {
-                        switch (reader.Name)
-                        {
-                            case "release":
-                                {
-                                    if (reader.IsEmptyElement)
-                                    {
-                                        reader.Read();
-                                        continue;
-                                    }
-
-                                    var releaseId = reader.GetAttribute("id");
-
-                                    using var subReader = reader.ReadSubtree();
-                                    var release = ParseRelease(subReader, releaseId);
-                                    if (release != null)
-                                    {
-                                        yield return release;
-                                    }
-
-                                    break;
-                                }
-
-                            default:
-                                {
-                                    reader.Skip();
-                                    break;
-                                }
-                        }
-                    }
-                    else
-                    {
-                        reader.Read();
-                    }
-                }
-            }
-
-            private static ReleaseResult ParseRelease(XmlReader reader, string releaseId)
-            {
-                var result = new ReleaseResult
-                {
-                    ReleaseId = releaseId
-                };
-
-                reader.MoveToContent();
-                reader.Read();
-
-                // http://stackoverflow.com/questions/2299632/why-does-xmlreader-skip-every-other-element-if-there-is-no-whitespace-separator
-
-                // Loop through each element
-                while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-                {
-                    if (reader.NodeType == XmlNodeType.Element)
-                    {
-                        switch (reader.Name)
-                        {
-                            case "title":
-                                {
-                                    result.Title = reader.ReadElementContentAsString();
-                                    break;
-                                }
-
-                            case "date":
-                                {
-                                    var val = reader.ReadElementContentAsString();
-                                    if (DateTime.TryParse(val, out var date))
-                                    {
-                                        result.Year = date.Year;
-                                    }
-
-                                    break;
-                                }
-
-                            case "annotation":
-                                {
-                                    result.Overview = reader.ReadElementContentAsString();
-                                    break;
-                                }
-
-                            case "release-group":
-                                {
-                                    result.ReleaseGroupId = reader.GetAttribute("id");
-                                    reader.Skip();
-                                    break;
-                                }
-
-                            case "artist-credit":
-                                {
-                                    using var subReader = reader.ReadSubtree();
-                                    var artist = ParseArtistCredit(subReader);
-
-                                    if (!string.IsNullOrEmpty(artist.Item1))
-                                    {
-                                        result.Artists.Add(artist);
-                                    }
-
-                                    break;
-                                }
-
-                            default:
-                                {
-                                    reader.Skip();
-                                    break;
-                                }
-                        }
-                    }
-                    else
-                    {
-                        reader.Read();
-                    }
-                }
-
-                return result;
+                releaseGroupId = release.ReleaseGroup.Id;
             }
         }
 
-        private static (string, string) ParseArtistCredit(XmlReader reader)
+        IReleaseGroup? releaseGroup = null;
+        if (releaseGroupId is not null)
         {
-            reader.MoveToContent();
-            reader.Read();
-
-            // http://stackoverflow.com/questions/2299632/why-does-xmlreader-skip-every-other-element-if-there-is-no-whitespace-separator
-
-            // Loop through each element
-            while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-            {
-                if (reader.NodeType == XmlNodeType.Element)
-                {
-                    switch (reader.Name)
-                    {
-                        case "name-credit":
-                        {
-                            using var subReader = reader.ReadSubtree();
-                            return ParseArtistNameCredit(subReader);
-                        }
-
-                        default:
-                            {
-                                reader.Skip();
-                                break;
-                            }
-                    }
-                }
-                else
-                {
-                    reader.Read();
-                }
-            }
-
-            return default;
+            releaseGroup = await query.LookupReleaseGroupOrNullAsync(
+                releaseGroupId.Value,
+                Include.Artists | Include.Genres | Include.Tags,
+                _logger,
+                cancellationToken).ConfigureAwait(false);
         }
 
-        private static (string, string) ParseArtistNameCredit(XmlReader reader)
+        if (release is null && releaseGroup is null)
         {
-            reader.MoveToContent();
-            reader.Read();
-
-            // http://stackoverflow.com/questions/2299632/why-does-xmlreader-skip-every-other-element-if-there-is-no-whitespace-separator
-
-            // Loop through each element
-            while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-            {
-                if (reader.NodeType == XmlNodeType.Element)
-                {
-                    switch (reader.Name)
-                    {
-                        case "artist":
-                            {
-                                var id = reader.GetAttribute("id");
-                                using var subReader = reader.ReadSubtree();
-                                return ParseArtistArtistCredit(subReader, id);
-                            }
-
-                        default:
-                            {
-                                reader.Skip();
-                                break;
-                            }
-                    }
-                }
-                else
-                {
-                    reader.Read();
-                }
-            }
-
-            return (null, null);
+            return result;
         }
 
-        private static (string name, string id) ParseArtistArtistCredit(XmlReader reader, string artistId)
+        result.HasMetadata = true;
+
+        if (releaseId is not null)
         {
-            reader.MoveToContent();
-            reader.Read();
-
-            string name = null;
-
-            // http://stackoverflow.com/questions/2299632/why-does-xmlreader-skip-every-other-element-if-there-is-no-whitespace-separator
-
-            // Loop through each element
-            while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-            {
-                if (reader.NodeType == XmlNodeType.Element)
-                {
-                    switch (reader.Name)
-                    {
-                        case "name":
-                            {
-                                name = reader.ReadElementContentAsString();
-                                break;
-                            }
-
-                        default:
-                            {
-                                reader.Skip();
-                                break;
-                            }
-                    }
-                }
-                else
-                {
-                    reader.Read();
-                }
-            }
-
-            return (name, artistId);
+            result.Item.SetProviderId(MetadataProvider.MusicBrainzAlbum, releaseId.Value.ToString());
         }
 
-        private async Task<string> GetReleaseIdFromReleaseGroupId(string releaseGroupId, CancellationToken cancellationToken)
+        if (releaseGroupId is not null)
         {
-            var url = "/ws/2/release?release-group=" + releaseGroupId.ToString(CultureInfo.InvariantCulture);
-
-            using var response = await GetMusicBrainzResponse(url, cancellationToken).ConfigureAwait(false);
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var oReader = new StreamReader(stream, Encoding.UTF8);
-            var settings = new XmlReaderSettings
-            {
-                ValidationType = ValidationType.None,
-                CheckCharacters = false,
-                IgnoreProcessingInstructions = true,
-                IgnoreComments = true
-            };
-
-            using var reader = XmlReader.Create(oReader, settings);
-            var result = ReleaseResult.Parse(reader).FirstOrDefault();
-
-            return result?.ReleaseId;
+            result.Item.SetProviderId(MetadataProvider.MusicBrainzReleaseGroup, releaseGroupId.Value.ToString());
         }
 
-        /// <summary>
-        /// Gets the release group id internal.
-        /// </summary>
-        /// <param name="releaseEntryId">The release entry id.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>Task{System.String}.</returns>
-        private async Task<string> GetReleaseGroupFromReleaseId(string releaseEntryId, CancellationToken cancellationToken)
+        Populate(result.Item, release, releaseGroup);
+
+        return result;
+    }
+
+    private static void Populate(MusicAlbum item, IRelease? release, IReleaseGroup? releaseGroup)
+    {
+        // Prefer the release group (album-level) data, falling back to the specific release.
+        // The release group's first release date is the original album date.
+        var date = releaseGroup?.FirstReleaseDate ?? release?.Date;
+        if (date is not null)
         {
-            var url = "/ws/2/release-group/?query=reid:" + releaseEntryId.ToString(CultureInfo.InvariantCulture);
-
-            using var response = await GetMusicBrainzResponse(url, cancellationToken).ConfigureAwait(false);
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-            using var oReader = new StreamReader(stream, Encoding.UTF8);
-            var settings = new XmlReaderSettings
-            {
-                ValidationType = ValidationType.None,
-                CheckCharacters = false,
-                IgnoreProcessingInstructions = true,
-                IgnoreComments = true
-            };
-
-            using var reader = XmlReader.Create(oReader, settings);
-            reader.MoveToContent();
-            reader.Read();
-
-            // Loop through each element
-            while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-            {
-                if (reader.NodeType == XmlNodeType.Element)
-                {
-                    switch (reader.Name)
-                    {
-                        case "release-group-list":
-                        {
-                            if (reader.IsEmptyElement)
-                            {
-                                reader.Read();
-                                continue;
-                            }
-
-                            using var subReader = reader.ReadSubtree();
-                            return GetFirstReleaseGroupId(subReader);
-                        }
-
-                        default:
-                        {
-                            reader.Skip();
-                            break;
-                        }
-                    }
-                }
-                else
-                {
-                    reader.Read();
-                }
-            }
-
-            return null;
+            item.PremiereDate = date.NearestDate;
+            item.ProductionYear = date.Year;
         }
 
-        private string GetFirstReleaseGroupId(XmlReader reader)
+        var artistCredit = release?.ArtistCredit ?? releaseGroup?.ArtistCredit;
+        if (artistCredit is not null && artistCredit.Count > 0)
         {
-            reader.MoveToContent();
-            reader.Read();
-
-            // Loop through each element
-            while (!reader.EOF && reader.ReadState == ReadState.Interactive)
-            {
-                if (reader.NodeType == XmlNodeType.Element)
-                {
-                    switch (reader.Name)
-                    {
-                        case "release-group":
-                            {
-                                return reader.GetAttribute("id");
-                            }
-
-                        default:
-                            {
-                                reader.Skip();
-                                break;
-                            }
-                    }
-                }
-                else
-                {
-                    reader.Read();
-                }
-            }
-
-            return null;
+            item.AlbumArtists = artistCredit
+                .Select(credit => credit.Artist?.Name ?? credit.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .ToArray();
         }
 
-        /// <summary>
-        /// Makes request to MusicBrainz server and awaits a response.
-        /// A 503 Service Unavailable response indicates throttling to maintain a rate limit.
-        /// A number of retries shall be made in order to try and satisfy the request before
-        /// giving up and returning null.
-        /// </summary>
-        internal async Task<HttpResponseMessage> GetMusicBrainzResponse(string url, CancellationToken cancellationToken)
+        var genres = releaseGroup?.Genres ?? release?.Genres;
+        if (genres is not null && genres.Count > 0)
         {
-            await _apiRequestLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-            try
-            {
-                HttpResponseMessage response;
-                var attempts = 0u;
-                var requestUrl = _musicBrainzBaseUrl.TrimEnd('/') + url;
-
-                do
-                {
-                    attempts++;
-
-                    if (_stopWatchMusicBrainz.ElapsedMilliseconds < _musicBrainzQueryIntervalMs)
-                    {
-                        // MusicBrainz is extremely adamant about limiting to one request per second.
-                        var delayMs = _musicBrainzQueryIntervalMs - _stopWatchMusicBrainz.ElapsedMilliseconds;
-                        await Task.Delay((int)delayMs, cancellationToken).ConfigureAwait(false);
-                    }
-
-                    // Write time since last request to debug log as evidence we're meeting rate limit
-                    // requirement, before resetting stopwatch back to zero.
-                    _logger.LogDebug("GetMusicBrainzResponse: Time since previous request: {0} ms", _stopWatchMusicBrainz.ElapsedMilliseconds);
-                    _stopWatchMusicBrainz.Restart();
-
-                    using var request = new HttpRequestMessage(HttpMethod.Get, requestUrl);
-                    response = await _httpClientFactory
-                        .CreateClient(NamedClient.MusicBrainz)
-                        .SendAsync(request, cancellationToken)
-                        .ConfigureAwait(false);
-
-                    // We retry a finite number of times, and only whilst MB is indicating 503 (throttling).
-                }
-                while (attempts < MusicBrainzQueryAttempts && response.StatusCode == HttpStatusCode.ServiceUnavailable);
-
-                // Log error if unable to query MB database due to throttling.
-                if (attempts == MusicBrainzQueryAttempts && response.StatusCode == HttpStatusCode.ServiceUnavailable)
-                {
-                    _logger.LogError("GetMusicBrainzResponse: 503 Service Unavailable (throttled) response received {0} times whilst requesting {1}", attempts, requestUrl);
-                }
-
-                return response;
-            }
-            finally
-            {
-                _apiRequestLock.Release();
-            }
+            item.Genres = genres
+                .OrderByDescending(genre => genre.VoteCount)
+                .Select(genre => genre.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .ToArray();
         }
 
-        /// <inheritdoc />
-        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
+        var tags = releaseGroup?.Tags ?? release?.Tags;
+        if (tags is not null && tags.Count > 0)
         {
-            throw new NotImplementedException();
+            item.Tags = tags
+                .OrderByDescending(tag => tag.VoteCount)
+                .Select(tag => tag.Name)
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .ToArray();
         }
+
+        if (release?.LabelInfo is not null && release.LabelInfo.Count > 0)
+        {
+            item.Studios = release.LabelInfo
+                .Where(labelInfo => !string.IsNullOrWhiteSpace(labelInfo.Label?.Name))
+                .Select(labelInfo => labelInfo.Label!.Name!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+        }
+    }
+
+    /// <inheritdoc />
+    public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
+    {
+        throw new NotImplementedException();
     }
 }

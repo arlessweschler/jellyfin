@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using MediaBrowser.Common.Providers;
 
 namespace Emby.Server.Implementations.Library
@@ -16,7 +17,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="attribute">The attrib.</param>
         /// <returns>System.String.</returns>
         /// <exception cref="ArgumentException"><paramref name="str" /> or <paramref name="attribute" /> is empty.</exception>
-        public static string? GetAttributeValue(this string str, string attribute)
+        public static string? GetAttributeValue(this ReadOnlySpan<char> str, ReadOnlySpan<char> attribute)
         {
             if (str.Length == 0)
             {
@@ -28,17 +29,83 @@ namespace Emby.Server.Implementations.Library
                 throw new ArgumentException("String can't be empty.", nameof(attribute));
             }
 
-            string srch = "[" + attribute + "=";
-            int start = str.IndexOf(srch, StringComparison.OrdinalIgnoreCase);
-            if (start != -1)
+            // Allow tmdb as an alias for tmdbid, tvdb for tvdbid, etc.
+            // The code below only supports aliases for attributes in the form of "<alias>id".
+            ReadOnlySpan<char> shortAttr = attribute switch
             {
-                start += srch.Length;
-                int end = str.IndexOf(']', start);
-                return str.Substring(start, end - start);
+                _ when attribute.Equals("tmdbid", StringComparison.OrdinalIgnoreCase) => "tmdb",
+                _ when attribute.Equals("tvdbid", StringComparison.OrdinalIgnoreCase) => "tvdb",
+                _ when attribute.Equals("imdbid", StringComparison.OrdinalIgnoreCase) => "imdb",
+                _ => ReadOnlySpan<char>.Empty
+            };
+
+            for (int strIndex = 0, attributeIndex = 0; attributeIndex > -1;)
+            {
+                // We may want to use imdbid pattern matching later, so we don't want to modify the original 'str'.
+                var subStr = str[strIndex..];
+                int attributeEnd = 0;
+
+                if (shortAttr.Length > 0)
+                {
+                    // If we are using an alias it should be shorter (and a prefix), so let's search for that.
+                    attributeIndex = subStr.IndexOf(shortAttr, StringComparison.OrdinalIgnoreCase);
+                    attributeEnd = attributeIndex + shortAttr.Length;
+                }
+                else
+                {
+                    attributeIndex = subStr.IndexOf(attribute, StringComparison.OrdinalIgnoreCase);
+                    attributeEnd = attributeIndex + attribute.Length;
+                }
+
+                // The next iteration should start at the end of the attribute we just found.
+                // If attributeIndex < 0, the loop will end and strIndex won't be used again.
+                strIndex += attributeEnd;
+
+                if (attributeIndex > 0)
+                {
+                    var attributeOpener = subStr[attributeIndex - 1];
+                    var attributeCloser = attributeOpener switch
+                    {
+                        '[' => ']',
+                        '(' => ')',
+                        '{' => '}',
+                        _ => '\0'
+                    };
+
+                    if (attributeCloser != '\0')
+                    {
+                        if (shortAttr.Length > 0
+                            && attributeEnd + 1 < subStr.Length
+                            && (subStr[attributeEnd] is 'i' or 'I')
+                            && (subStr[attributeEnd + 1] is 'd' or 'D'))
+                        {
+                            // We were searching for a shortened attribute, but it's followed by "id" - let's skip it.
+                            attributeEnd += 2;
+                        }
+
+                        // attributeEnd points at '='.
+                        // We need at least 1 more character and the closing bracket after that.
+                        if (attributeEnd + 2 < subStr.Length && (subStr[attributeEnd] is '=' or '-'))
+                        {
+                            var closingIndex = subStr[attributeEnd..].IndexOf(attributeCloser);
+
+                            // Must be at least 1 character before the closing bracket.
+                            if (closingIndex > 1)
+                            {
+                                var trimmed = subStr[(attributeEnd + 1)..(attributeEnd + closingIndex)].Trim();
+
+                                if (trimmed.Length > 0)
+                                {
+                                    return trimmed.ToString();
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
             // for imdbid we also accept pattern matching
-            if (string.Equals(attribute, "imdbid", StringComparison.OrdinalIgnoreCase))
+            if (attribute.Equals("imdbid", StringComparison.OrdinalIgnoreCase))
             {
                 var match = ProviderIdParsers.TryFindImdbId(str, out var imdbId);
                 return match ? imdbId.ToString() : null;
@@ -53,7 +120,7 @@ namespace Emby.Server.Implementations.Library
         /// <param name="path">The original path.</param>
         /// <param name="subPath">The original sub path.</param>
         /// <param name="newSubPath">The new sub path.</param>
-        /// <param name="newPath">The result of the sub path replacement</param>
+        /// <param name="newPath">The result of the sub path replacement.</param>
         /// <returns>The path after replacing the sub path.</returns>
         /// <exception cref="ArgumentNullException"><paramref name="path" />, <paramref name="newSubPath" /> or <paramref name="newSubPath" /> is empty.</exception>
         public static bool TryReplaceSubPath(
@@ -72,24 +139,8 @@ namespace Emby.Server.Implementations.Library
                 return false;
             }
 
-            char oldDirectorySeparatorChar;
-            char newDirectorySeparatorChar;
-            // True normalization is still not possible https://github.com/dotnet/runtime/issues/2162
-            // The reasoning behind this is that a forward slash likely means it's a Linux path and
-            // so the whole path should be normalized to use / and vice versa for Windows (although Windows doesn't care much).
-            if (newSubPath.Contains('/', StringComparison.Ordinal))
-            {
-                oldDirectorySeparatorChar = '\\';
-                newDirectorySeparatorChar = '/';
-            }
-            else
-            {
-                oldDirectorySeparatorChar = '/';
-                newDirectorySeparatorChar = '\\';
-            }
-
-            path = path.Replace(oldDirectorySeparatorChar, newDirectorySeparatorChar);
-            subPath = subPath.Replace(oldDirectorySeparatorChar, newDirectorySeparatorChar);
+            subPath = subPath.NormalizePath(out var newDirectorySeparatorChar);
+            path = path.NormalizePath(newDirectorySeparatorChar);
 
             // We have to ensure that the sub path ends with a directory separator otherwise we'll get weird results
             // when the sub path matches a similar but in-complete subpath
@@ -112,6 +163,83 @@ namespace Emby.Server.Implementations.Library
             newPath = string.Concat(newSubPathTrimmed, path.AsSpan(idx));
 
             return true;
+        }
+
+        /// <summary>
+        /// Retrieves the full resolved path and normalizes path separators to the <see cref="Path.DirectorySeparatorChar"/>.
+        /// </summary>
+        /// <param name="path">The path to canonicalize.</param>
+        /// <returns>The fully expanded, normalized path.</returns>
+        public static string Canonicalize(this string path)
+        {
+            return Path.GetFullPath(path).NormalizePath();
+        }
+
+        /// <summary>
+        /// Normalizes the path's directory separator character to the currently defined <see cref="Path.DirectorySeparatorChar"/>.
+        /// </summary>
+        /// <param name="path">The path to normalize.</param>
+        /// <returns>The normalized path string or <see langword="null"/> if the input path is null or empty.</returns>
+        [return: NotNullIfNotNull(nameof(path))]
+        public static string? NormalizePath(this string? path)
+        {
+            return path.NormalizePath(Path.DirectorySeparatorChar);
+        }
+
+        /// <summary>
+        /// Normalizes the path's directory separator character.
+        /// </summary>
+        /// <param name="path">The path to normalize.</param>
+        /// <param name="separator">The separator character the path now uses or <see langword="null"/>.</param>
+        /// <returns>The normalized path string or <see langword="null"/> if the input path is null or empty.</returns>
+        [return: NotNullIfNotNull(nameof(path))]
+        public static string? NormalizePath(this string? path, out char separator)
+        {
+            if (string.IsNullOrEmpty(path))
+            {
+                separator = default;
+                return path;
+            }
+
+            var newSeparator = '\\';
+
+            // True normalization is still not possible https://github.com/dotnet/runtime/issues/2162
+            // The reasoning behind this is that a forward slash likely means it's a Linux path and
+            // so the whole path should be normalized to use / and vice versa for Windows (although Windows doesn't care much).
+            if (path.Contains('/', StringComparison.Ordinal))
+            {
+                newSeparator = '/';
+            }
+
+            separator = newSeparator;
+
+            return path.NormalizePath(newSeparator);
+        }
+
+        /// <summary>
+        /// Normalizes the path's directory separator character to the specified character.
+        /// </summary>
+        /// <param name="path">The path to normalize.</param>
+        /// <param name="newSeparator">The replacement directory separator character. Must be a valid directory separator.</param>
+        /// <returns>The normalized path.</returns>
+        /// <exception cref="ArgumentException">Thrown if the new separator character is not a directory separator.</exception>
+        [return: NotNullIfNotNull(nameof(path))]
+        public static string? NormalizePath(this string? path, char newSeparator)
+        {
+            const char Bs = '\\';
+            const char Fs = '/';
+
+            if (!(newSeparator == Bs || newSeparator == Fs))
+            {
+                throw new ArgumentException("The character must be a directory separator.");
+            }
+
+            if (string.IsNullOrEmpty(path))
+            {
+                return path;
+            }
+
+            return newSeparator == Bs ? path.Replace(Fs, newSeparator) : path.Replace(Bs, newSeparator);
         }
     }
 }

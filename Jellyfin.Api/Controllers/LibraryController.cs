@@ -4,26 +4,28 @@ using System.ComponentModel.DataAnnotations;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Net;
-using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Api.Attributes;
-using Jellyfin.Api.Constants;
 using Jellyfin.Api.Extensions;
+using Jellyfin.Api.Helpers;
 using Jellyfin.Api.ModelBinders;
 using Jellyfin.Api.Models.LibraryDtos;
-using Jellyfin.Data.Entities;
-using MediaBrowser.Common.Progress;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
+using Jellyfin.Extensions;
+using MediaBrowser.Common.Api;
+using MediaBrowser.Common.Extensions;
+using MediaBrowser.Controller.Collections;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
+using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
-using MediaBrowser.Controller.LiveTv;
-using MediaBrowser.Controller.Net;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Configuration;
@@ -36,308 +38,398 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
-using Book = MediaBrowser.Controller.Entities.Book;
 
-namespace Jellyfin.Api.Controllers
+namespace Jellyfin.Api.Controllers;
+
+/// <summary>
+/// Library Controller.
+/// </summary>
+[Route("")]
+public class LibraryController : BaseJellyfinApiController
 {
-    /// <summary>
-    /// Library Controller.
-    /// </summary>
-    [Route("")]
-    public class LibraryController : BaseJellyfinApiController
-    {
-        private readonly IProviderManager _providerManager;
-        private readonly ILibraryManager _libraryManager;
-        private readonly IUserManager _userManager;
-        private readonly IDtoService _dtoService;
-        private readonly IAuthorizationContext _authContext;
-        private readonly IActivityManager _activityManager;
-        private readonly ILocalizationManager _localization;
-        private readonly ILibraryMonitor _libraryMonitor;
-        private readonly ILogger<LibraryController> _logger;
-        private readonly IServerConfigurationManager _serverConfigurationManager;
+    private readonly IProviderManager _providerManager;
+    private readonly ISimilarItemsManager _similarItemsManager;
+    private readonly ILibraryManager _libraryManager;
+    private readonly IUserManager _userManager;
+    private readonly ICollectionManager _collectionManager;
+    private readonly IDtoService _dtoService;
+    private readonly IActivityManager _activityManager;
+    private readonly ILocalizationManager _localization;
+    private readonly ILibraryMonitor _libraryMonitor;
+    private readonly ILogger<LibraryController> _logger;
+    private readonly IServerConfigurationManager _serverConfigurationManager;
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="LibraryController"/> class.
-        /// </summary>
-        /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
-        /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
-        /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
-        /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
-        /// <param name="authContext">Instance of the <see cref="IAuthorizationContext"/> interface.</param>
-        /// <param name="activityManager">Instance of the <see cref="IActivityManager"/> interface.</param>
-        /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
-        /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
-        /// <param name="logger">Instance of the <see cref="ILogger{LibraryController}"/> interface.</param>
-        /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
-        public LibraryController(
-            IProviderManager providerManager,
-            ILibraryManager libraryManager,
-            IUserManager userManager,
-            IDtoService dtoService,
-            IAuthorizationContext authContext,
-            IActivityManager activityManager,
-            ILocalizationManager localization,
-            ILibraryMonitor libraryMonitor,
-            ILogger<LibraryController> logger,
-            IServerConfigurationManager serverConfigurationManager)
+    /// <summary>
+    /// Initializes a new instance of the <see cref="LibraryController"/> class.
+    /// </summary>
+    /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
+    /// <param name="similarItemsManager">Instance of the <see cref="ISimilarItemsManager"/> interface.</param>
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
+    /// <param name="collectionManager">Instance of the <see cref="ICollectionManager"/> interface.</param>
+    /// <param name="dtoService">Instance of the <see cref="IDtoService"/> interface.</param>
+    /// <param name="activityManager">Instance of the <see cref="IActivityManager"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    /// <param name="libraryMonitor">Instance of the <see cref="ILibraryMonitor"/> interface.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger{LibraryController}"/> interface.</param>
+    /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
+    public LibraryController(
+        IProviderManager providerManager,
+        ISimilarItemsManager similarItemsManager,
+        ILibraryManager libraryManager,
+        IUserManager userManager,
+        ICollectionManager collectionManager,
+        IDtoService dtoService,
+        IActivityManager activityManager,
+        ILocalizationManager localization,
+        ILibraryMonitor libraryMonitor,
+        ILogger<LibraryController> logger,
+        IServerConfigurationManager serverConfigurationManager)
+    {
+        _providerManager = providerManager;
+        _similarItemsManager = similarItemsManager;
+        _libraryManager = libraryManager;
+        _userManager = userManager;
+        _collectionManager = collectionManager;
+        _dtoService = dtoService;
+        _activityManager = activityManager;
+        _localization = localization;
+        _libraryMonitor = libraryMonitor;
+        _logger = logger;
+        _serverConfigurationManager = serverConfigurationManager;
+    }
+
+    /// <summary>
+    /// Get the original file of an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <response code="200">File stream returned.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>A <see cref="FileStreamResult"/> with the original file.</returns>
+    [HttpGet("Items/{itemId}/File")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesFile("video/*", "audio/*")]
+    public ActionResult GetFile([FromRoute, Required] Guid itemId)
+    {
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, User.GetUserId());
+        if (item is null)
         {
-            _providerManager = providerManager;
-            _libraryManager = libraryManager;
-            _userManager = userManager;
-            _dtoService = dtoService;
-            _authContext = authContext;
-            _activityManager = activityManager;
-            _localization = localization;
-            _libraryMonitor = libraryMonitor;
-            _logger = logger;
-            _serverConfigurationManager = serverConfigurationManager;
+            return NotFound();
         }
 
-        /// <summary>
-        /// Get the original file of an item.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <response code="200">File stream returned.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>A <see cref="FileStreamResult"/> with the original file.</returns>
-        [HttpGet("Items/{itemId}/File")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        [ProducesFile("video/*", "audio/*")]
-        public ActionResult GetFile([FromRoute, Required] Guid itemId)
+        var filePath = item.Path;
+        if (item.IsFileProtocol)
         {
-            var item = _libraryManager.GetItemById(itemId);
-            if (item == null)
+            // PhysicalFile does not work well with symlinks at the moment.
+            var resolved = FileSystemHelper.ResolveLinkTarget(filePath, returnFinalTarget: true);
+            if (resolved is not null && resolved.Exists)
+            {
+                filePath = resolved.FullName;
+            }
+        }
+
+        return PhysicalFile(filePath, MimeTypes.GetMimeType(filePath), true);
+    }
+
+    /// <summary>
+    /// Get theme songs for an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
+    /// <param name="sortBy">Optional. Specify one or more sort orders, comma delimited. Options: Album, AlbumArtist, Artist, Budget, CommunityRating, CriticRating, DateCreated, DatePlayed, PlayCount, PremiereDate, ProductionYear, SortName, Random, Revenue, Runtime.</param>
+    /// <param name="sortOrder">Optional. Sort Order - Ascending, Descending.</param>
+    /// <response code="200">Theme songs returned.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>The item theme songs.</returns>
+    [HttpGet("Items/{itemId}/ThemeSongs")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<ThemeMediaResult> GetThemeSongs(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] Guid? userId,
+        [FromQuery] bool inheritFromParent = false,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[]? sortBy = null,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[]? sortOrder = null)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+
+        var item = itemId.IsEmpty()
+            ? (userId.IsNullOrEmpty()
+                ? _libraryManager.RootFolder
+                : _libraryManager.GetUserRootFolder())
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        sortOrder ??= [];
+        sortBy ??= [];
+        var orderBy = RequestHelpers.GetOrderBy(sortBy, sortOrder);
+
+        IReadOnlyList<BaseItem> themeItems;
+
+        while (true)
+        {
+            themeItems = item.GetThemeSongs(user, orderBy);
+
+            if (themeItems.Count > 0 || !inheritFromParent)
+            {
+                break;
+            }
+
+            var parent = item.GetParent();
+            if (parent is null)
+            {
+                break;
+            }
+
+            item = parent;
+        }
+
+        var dtoOptions = new DtoOptions();
+        var items = themeItems
+            .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item))
+            .ToArray();
+
+        return new ThemeMediaResult
+        {
+            Items = items,
+            TotalRecordCount = items.Length,
+            OwnerId = item.Id
+        };
+    }
+
+    /// <summary>
+    /// Get theme videos for an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
+    /// <param name="sortBy">Optional. Specify one or more sort orders, comma delimited. Options: Album, AlbumArtist, Artist, Budget, CommunityRating, CriticRating, DateCreated, DatePlayed, PlayCount, PremiereDate, ProductionYear, SortName, Random, Revenue, Runtime.</param>
+    /// <param name="sortOrder">Optional. Sort Order - Ascending, Descending.</param>
+    /// <response code="200">Theme videos returned.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>The item theme videos.</returns>
+    [HttpGet("Items/{itemId}/ThemeVideos")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<ThemeMediaResult> GetThemeVideos(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] Guid? userId,
+        [FromQuery] bool inheritFromParent = false,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[]? sortBy = null,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[]? sortOrder = null)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+        var item = itemId.IsEmpty()
+            ? (userId.IsNullOrEmpty()
+                ? _libraryManager.RootFolder
+                : _libraryManager.GetUserRootFolder())
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        sortOrder ??= [];
+        sortBy ??= [];
+        var orderBy = RequestHelpers.GetOrderBy(sortBy, sortOrder);
+
+        IEnumerable<BaseItem> themeItems;
+
+        while (true)
+        {
+            themeItems = item.GetThemeVideos(user, orderBy);
+
+            if (themeItems.Any() || !inheritFromParent)
+            {
+                break;
+            }
+
+            var parent = item.GetParent();
+            if (parent is null)
+            {
+                break;
+            }
+
+            item = parent;
+        }
+
+        var dtoOptions = new DtoOptions();
+        var items = themeItems
+            .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item))
+            .ToArray();
+
+        return new ThemeMediaResult
+        {
+            Items = items,
+            TotalRecordCount = items.Length,
+            OwnerId = item.Id
+        };
+    }
+
+    /// <summary>
+    /// Get theme songs and videos for an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
+    /// <param name="sortBy">Optional. Specify one or more sort orders, comma delimited. Options: Album, AlbumArtist, Artist, Budget, CommunityRating, CriticRating, DateCreated, DatePlayed, PlayCount, PremiereDate, ProductionYear, SortName, Random, Revenue, Runtime.</param>
+    /// <param name="sortOrder">Optional. Sort Order - Ascending, Descending.</param>
+    /// <response code="200">Theme songs and videos returned.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>The item theme videos.</returns>
+    [HttpGet("Items/{itemId}/ThemeMedia")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<AllThemeMediaResult> GetThemeMedia(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] Guid? userId,
+        [FromQuery] bool inheritFromParent = false,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemSortBy[]? sortBy = null,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] SortOrder[]? sortOrder = null)
+    {
+        var themeSongs = GetThemeSongs(
+            itemId,
+            userId,
+            inheritFromParent,
+            sortBy,
+            sortOrder);
+
+        var themeVideos = GetThemeVideos(
+            itemId,
+            userId,
+            inheritFromParent,
+            sortBy,
+            sortOrder);
+
+        if (themeSongs.Result is StatusCodeResult { StatusCode: StatusCodes.Status404NotFound }
+            || themeVideos.Result is StatusCodeResult { StatusCode: StatusCodes.Status404NotFound })
+        {
+            return NotFound();
+        }
+
+        return new AllThemeMediaResult
+        {
+            ThemeSongsResult = themeSongs.Value,
+            ThemeVideosResult = themeVideos.Value,
+            SoundtrackSongsResult = new ThemeMediaResult()
+        };
+    }
+
+    /// <summary>
+    /// Starts a library scan.
+    /// </summary>
+    /// <response code="204">Library scan started.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpPost("Library/Refresh")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<ActionResult> RefreshLibrary()
+    {
+        try
+        {
+            await _libraryManager.ValidateMediaLibrary(new Progress<double>(), CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error refreshing library");
+        }
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Deletes an item from the library and filesystem.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <response code="204">Item deleted.</response>
+    /// <response code="401">Unauthorized access.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpDelete("Items/{itemId}")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult DeleteItem(Guid itemId)
+    {
+        var userId = User.GetUserId();
+        var isApiKey = User.GetIsApiKey();
+        var user = userId.IsEmpty() && isApiKey
+            ? null
+            : _userManager.GetUserById(userId);
+
+        if (user is null && !isApiKey)
+        {
+            return NotFound();
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        if (user is not null && !item.CanDelete(user))
+        {
+            return Unauthorized("Unauthorized access");
+        }
+
+        _libraryManager.DeleteItem(
+            item,
+            new DeleteOptions { DeleteFileLocation = true },
+            true);
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Deletes items from the library and filesystem.
+    /// </summary>
+    /// <param name="ids">The item ids.</param>
+    /// <response code="204">Items deleted.</response>
+    /// <response code="401">Unauthorized access.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpDelete("Items")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] ids)
+    {
+        var isApiKey = User.GetIsApiKey();
+        var userId = User.GetUserId();
+        var user = !isApiKey && !userId.IsEmpty()
+            ? _userManager.GetUserById(userId) ?? throw new ResourceNotFoundException()
+            : null;
+
+        if (!isApiKey && user is null)
+        {
+            return Unauthorized("Unauthorized access");
+        }
+
+        foreach (var i in ids)
+        {
+            var item = _libraryManager.GetItemById<BaseItem>(i, user);
+            if (item is null)
             {
                 return NotFound();
             }
 
-            return PhysicalFile(item.Path, MimeTypes.GetMimeType(item.Path), true);
-        }
-
-        /// <summary>
-        /// Gets critic review for an item.
-        /// </summary>
-        /// <response code="200">Critic reviews returned.</response>
-        /// <returns>The list of critic reviews.</returns>
-        [HttpGet("Items/{itemId}/CriticReviews")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [Obsolete("This endpoint is obsolete.")]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QueryResult<BaseItemDto>> GetCriticReviews()
-        {
-            return new QueryResult<BaseItemDto>();
-        }
-
-        /// <summary>
-        /// Get theme songs for an item.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
-        /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
-        /// <response code="200">Theme songs returned.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>The item theme songs.</returns>
-        [HttpGet("Items/{itemId}/ThemeSongs")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        public ActionResult<ThemeMediaResult> GetThemeSongs(
-            [FromRoute, Required] Guid itemId,
-            [FromQuery] Guid? userId,
-            [FromQuery] bool inheritFromParent = false)
-        {
-            var user = userId.HasValue && !userId.Equals(Guid.Empty)
-                ? _userManager.GetUserById(userId.Value)
-                : null;
-
-            var item = itemId.Equals(Guid.Empty)
-                ? (!userId.Equals(Guid.Empty)
-                    ? _libraryManager.GetUserRootFolder()
-                    : _libraryManager.RootFolder)
-                : _libraryManager.GetItemById(itemId);
-
-            if (item == null)
-            {
-                return NotFound("Item not found.");
-            }
-
-            IEnumerable<BaseItem> themeItems;
-
-            while (true)
-            {
-                themeItems = item.GetThemeSongs();
-
-                if (themeItems.Any() || !inheritFromParent)
-                {
-                    break;
-                }
-
-                var parent = item.GetParent();
-                if (parent == null)
-                {
-                    break;
-                }
-
-                item = parent;
-            }
-
-            var dtoOptions = new DtoOptions().AddClientFields(Request);
-            var items = themeItems
-                .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item))
-                .ToArray();
-
-            return new ThemeMediaResult
-            {
-                Items = items,
-                TotalRecordCount = items.Length,
-                OwnerId = item.Id
-            };
-        }
-
-        /// <summary>
-        /// Get theme videos for an item.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
-        /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
-        /// <response code="200">Theme videos returned.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>The item theme videos.</returns>
-        [HttpGet("Items/{itemId}/ThemeVideos")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        public ActionResult<ThemeMediaResult> GetThemeVideos(
-            [FromRoute, Required] Guid itemId,
-            [FromQuery] Guid? userId,
-            [FromQuery] bool inheritFromParent = false)
-        {
-            var user = userId.HasValue && !userId.Equals(Guid.Empty)
-                ? _userManager.GetUserById(userId.Value)
-                : null;
-
-            var item = itemId.Equals(Guid.Empty)
-                ? (!userId.Equals(Guid.Empty)
-                    ? _libraryManager.GetUserRootFolder()
-                    : _libraryManager.RootFolder)
-                : _libraryManager.GetItemById(itemId);
-
-            if (item == null)
-            {
-                return NotFound("Item not found.");
-            }
-
-            IEnumerable<BaseItem> themeItems;
-
-            while (true)
-            {
-                themeItems = item.GetThemeVideos();
-
-                if (themeItems.Any() || !inheritFromParent)
-                {
-                    break;
-                }
-
-                var parent = item.GetParent();
-                if (parent == null)
-                {
-                    break;
-                }
-
-                item = parent;
-            }
-
-            var dtoOptions = new DtoOptions().AddClientFields(Request);
-            var items = themeItems
-                .Select(i => _dtoService.GetBaseItemDto(i, dtoOptions, user, item))
-                .ToArray();
-
-            return new ThemeMediaResult
-            {
-                Items = items,
-                TotalRecordCount = items.Length,
-                OwnerId = item.Id
-            };
-        }
-
-        /// <summary>
-        /// Get theme songs and videos for an item.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
-        /// <param name="inheritFromParent">Optional. Determines whether or not parent items should be searched for theme media.</param>
-        /// <response code="200">Theme songs and videos returned.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>The item theme videos.</returns>
-        [HttpGet("Items/{itemId}/ThemeMedia")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<AllThemeMediaResult> GetThemeMedia(
-            [FromRoute, Required] Guid itemId,
-            [FromQuery] Guid? userId,
-            [FromQuery] bool inheritFromParent = false)
-        {
-            var themeSongs = GetThemeSongs(
-                itemId,
-                userId,
-                inheritFromParent);
-
-            var themeVideos = GetThemeVideos(
-                itemId,
-                userId,
-                inheritFromParent);
-
-            return new AllThemeMediaResult
-            {
-                ThemeSongsResult = themeSongs?.Value,
-                ThemeVideosResult = themeVideos?.Value,
-                SoundtrackSongsResult = new ThemeMediaResult()
-            };
-        }
-
-        /// <summary>
-        /// Starts a library scan.
-        /// </summary>
-        /// <response code="204">Library scan started.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpPost("Library/Refresh")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public async Task<ActionResult> RefreshLibrary()
-        {
-            try
-            {
-                await _libraryManager.ValidateMediaLibrary(new SimpleProgress<double>(), CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                 _logger.LogError(ex, "Error refreshing library");
-            }
-
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Deletes an item from the library and filesystem.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <response code="204">Item deleted.</response>
-        /// <response code="401">Unauthorized access.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpDelete("Items/{itemId}")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-        public ActionResult DeleteItem(Guid itemId)
-        {
-            var item = _libraryManager.GetItemById(itemId);
-            var auth = _authContext.GetAuthorizationInfo(Request);
-            var user = auth.User;
-
-            if (!item.CanDelete(user))
+            if (user is not null && !item.CanDelete(user))
             {
                 return Unauthorized("Unauthorized access");
             }
@@ -346,493 +438,507 @@ namespace Jellyfin.Api.Controllers
                 item,
                 new DeleteOptions { DeleteFileLocation = true },
                 true);
-
-            return NoContent();
         }
 
-        /// <summary>
-        /// Deletes items from the library and filesystem.
-        /// </summary>
-        /// <param name="ids">The item ids.</param>
-        /// <response code="204">Items deleted.</response>
-        /// <response code="401">Unauthorized access.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpDelete("Items")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        [ProducesResponseType(StatusCodes.Status401Unauthorized)]
-        public ActionResult DeleteItems([FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] ids)
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Get item counts.
+    /// </summary>
+    /// <param name="userId">Optional. Get counts from a specific user's library.</param>
+    /// <param name="isFavorite">Optional. Get counts of favorite items.</param>
+    /// <response code="200">Item counts returned.</response>
+    /// <returns>Item counts.</returns>
+    [HttpGet("Items/Counts")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<ItemCounts> GetItemCounts(
+        [FromQuery] Guid? userId,
+        [FromQuery] bool? isFavorite)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+
+        var query = new InternalItemsQuery(user)
         {
-            if (ids.Length == 0)
+            Recursive = true,
+            IsVirtualItem = false,
+            IsFavorite = isFavorite,
+            DtoOptions = new DtoOptions(false)
             {
-                return NoContent();
+                EnableImages = false
             }
+        };
 
-            foreach (var i in ids)
+        return _libraryManager.GetItemCounts(query);
+    }
+
+    /// <summary>
+    /// Gets all parents of an item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <response code="200">Item parents returned.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>Item parents.</returns>
+    [HttpGet("Items/{itemId}/Ancestors")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<IEnumerable<BaseItemDto>> GetAncestors([FromRoute, Required] Guid itemId, [FromQuery] Guid? userId)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var baseItemDtos = new List<BaseItemDto>();
+
+        var dtoOptions = new DtoOptions();
+        BaseItem? parent = item.GetParent();
+
+        while (parent is not null)
+        {
+            if (user is not null)
             {
-                var item = _libraryManager.GetItemById(i);
-                var auth = _authContext.GetAuthorizationInfo(Request);
-                var user = auth.User;
-
-                if (!item.CanDelete(user))
+                parent = TranslateParentItem(parent, user);
+                if (parent is null)
                 {
-                    if (ids.Length > 1)
-                    {
-                        return Unauthorized("Unauthorized access");
-                    }
-
-                    continue;
-                }
-
-                _libraryManager.DeleteItem(
-                    item,
-                    new DeleteOptions { DeleteFileLocation = true },
-                    true);
-            }
-
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Get item counts.
-        /// </summary>
-        /// <param name="userId">Optional. Get counts from a specific user's library.</param>
-        /// <param name="isFavorite">Optional. Get counts of favorite items.</param>
-        /// <response code="200">Item counts returned.</response>
-        /// <returns>Item counts.</returns>
-        [HttpGet("Items/Counts")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<ItemCounts> GetItemCounts(
-            [FromQuery] Guid? userId,
-            [FromQuery] bool? isFavorite)
-        {
-            var user = userId.HasValue && !userId.Equals(Guid.Empty)
-                ? _userManager.GetUserById(userId.Value)
-                : null;
-
-            var counts = new ItemCounts
-            {
-                AlbumCount = GetCount(typeof(MusicAlbum), user, isFavorite),
-                EpisodeCount = GetCount(typeof(Episode), user, isFavorite),
-                MovieCount = GetCount(typeof(Movie), user, isFavorite),
-                SeriesCount = GetCount(typeof(Series), user, isFavorite),
-                SongCount = GetCount(typeof(Audio), user, isFavorite),
-                MusicVideoCount = GetCount(typeof(MusicVideo), user, isFavorite),
-                BoxSetCount = GetCount(typeof(BoxSet), user, isFavorite),
-                BookCount = GetCount(typeof(Book), user, isFavorite)
-            };
-
-            return counts;
-        }
-
-        /// <summary>
-        /// Gets all parents of an item.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
-        /// <response code="200">Item parents returned.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>Item parents.</returns>
-        [HttpGet("Items/{itemId}/Ancestors")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        public ActionResult<IEnumerable<BaseItemDto>> GetAncestors([FromRoute, Required] Guid itemId, [FromQuery] Guid? userId)
-        {
-            var item = _libraryManager.GetItemById(itemId);
-
-            if (item == null)
-            {
-                return NotFound("Item not found");
-            }
-
-            var baseItemDtos = new List<BaseItemDto>();
-
-            var user = userId.HasValue && !userId.Equals(Guid.Empty)
-                ? _userManager.GetUserById(userId.Value)
-                : null;
-
-            var dtoOptions = new DtoOptions().AddClientFields(Request);
-            BaseItem? parent = item.GetParent();
-
-            while (parent != null)
-            {
-                if (user != null)
-                {
-                    parent = TranslateParentItem(parent, user);
-                }
-
-                baseItemDtos.Add(_dtoService.GetBaseItemDto(parent, dtoOptions, user));
-
-                parent = parent?.GetParent();
-            }
-
-            return baseItemDtos;
-        }
-
-        /// <summary>
-        /// Gets a list of physical paths from virtual folders.
-        /// </summary>
-        /// <response code="200">Physical paths returned.</response>
-        /// <returns>List of physical paths.</returns>
-        [HttpGet("Library/PhysicalPaths")]
-        [Authorize(Policy = Policies.RequiresElevation)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<IEnumerable<string>> GetPhysicalPaths()
-        {
-            return Ok(_libraryManager.RootFolder.Children
-                .SelectMany(c => c.PhysicalLocations));
-        }
-
-        /// <summary>
-        /// Gets all user media folders.
-        /// </summary>
-        /// <param name="isHidden">Optional. Filter by folders that are marked hidden, or not.</param>
-        /// <response code="200">Media folders returned.</response>
-        /// <returns>List of user media folders.</returns>
-        [HttpGet("Library/MediaFolders")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QueryResult<BaseItemDto>> GetMediaFolders([FromQuery] bool? isHidden)
-        {
-            var items = _libraryManager.GetUserRootFolder().Children.Concat(_libraryManager.RootFolder.VirtualChildren).OrderBy(i => i.SortName).ToList();
-
-            if (isHidden.HasValue)
-            {
-                var val = isHidden.Value;
-
-                items = items.Where(i => i.IsHidden == val).ToList();
-            }
-
-            var dtoOptions = new DtoOptions().AddClientFields(Request);
-            var result = new QueryResult<BaseItemDto>
-            {
-                TotalRecordCount = items.Count,
-                Items = items.Select(i => _dtoService.GetBaseItemDto(i, dtoOptions)).ToArray()
-            };
-
-            return result;
-        }
-
-        /// <summary>
-        /// Reports that new episodes of a series have been added by an external source.
-        /// </summary>
-        /// <param name="tvdbId">The tvdbId.</param>
-        /// <response code="204">Report success.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpPost("Library/Series/Added", Name = "PostAddedSeries")]
-        [HttpPost("Library/Series/Updated")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult PostUpdatedSeries([FromQuery] string? tvdbId)
-        {
-            var series = _libraryManager.GetItemList(new InternalItemsQuery
-            {
-                IncludeItemTypes = new[] { nameof(Series) },
-                DtoOptions = new DtoOptions(false)
-                {
-                    EnableImages = false
-                }
-            }).Where(i => string.Equals(tvdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Tvdb), StringComparison.OrdinalIgnoreCase)).ToArray();
-
-            foreach (var item in series)
-            {
-                _libraryMonitor.ReportFileSystemChanged(item.Path);
-            }
-
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Reports that new movies have been added by an external source.
-        /// </summary>
-        /// <param name="tmdbId">The tmdbId.</param>
-        /// <param name="imdbId">The imdbId.</param>
-        /// <response code="204">Report success.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpPost("Library/Movies/Added", Name = "PostAddedMovies")]
-        [HttpPost("Library/Movies/Updated")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult PostUpdatedMovies([FromQuery] string? tmdbId, [FromQuery] string? imdbId)
-        {
-            var movies = _libraryManager.GetItemList(new InternalItemsQuery
-            {
-                IncludeItemTypes = new[] { nameof(Movie) },
-                DtoOptions = new DtoOptions(false)
-                {
-                    EnableImages = false
-                }
-            });
-
-            if (!string.IsNullOrWhiteSpace(imdbId))
-            {
-                movies = movies.Where(i => string.Equals(imdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Imdb), StringComparison.OrdinalIgnoreCase)).ToList();
-            }
-            else if (!string.IsNullOrWhiteSpace(tmdbId))
-            {
-                movies = movies.Where(i => string.Equals(tmdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Tmdb), StringComparison.OrdinalIgnoreCase)).ToList();
-            }
-            else
-            {
-                movies = new List<BaseItem>();
-            }
-
-            foreach (var item in movies)
-            {
-                _libraryMonitor.ReportFileSystemChanged(item.Path);
-            }
-
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Reports that new movies have been added by an external source.
-        /// </summary>
-        /// <param name="dto">The update paths.</param>
-        /// <response code="204">Report success.</response>
-        /// <returns>A <see cref="NoContentResult"/>.</returns>
-        [HttpPost("Library/Media/Updated")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status204NoContent)]
-        public ActionResult PostUpdatedMedia([FromBody, Required] MediaUpdateInfoDto dto)
-        {
-            foreach (var item in dto.Updates)
-            {
-                _libraryMonitor.ReportFileSystemChanged(item.Path ?? throw new ArgumentException("Item path can't be null."));
-            }
-
-            return NoContent();
-        }
-
-        /// <summary>
-        /// Downloads item media.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <response code="200">Media downloaded.</response>
-        /// <response code="404">Item not found.</response>
-        /// <returns>A <see cref="FileResult"/> containing the media stream.</returns>
-        /// <exception cref="ArgumentException">User can't download or item can't be downloaded.</exception>
-        [HttpGet("Items/{itemId}/Download")]
-        [Authorize(Policy = Policies.Download)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        [ProducesResponseType(StatusCodes.Status404NotFound)]
-        [ProducesFile("video/*", "audio/*")]
-        public async Task<ActionResult> GetDownload([FromRoute, Required] Guid itemId)
-        {
-            var item = _libraryManager.GetItemById(itemId);
-            if (item == null)
-            {
-                return NotFound();
-            }
-
-            var auth = _authContext.GetAuthorizationInfo(Request);
-
-            var user = auth.User;
-
-            if (user != null)
-            {
-                if (!item.CanDownload(user))
-                {
-                    throw new ArgumentException("Item does not support downloading");
-                }
-            }
-            else
-            {
-                if (!item.CanDownload())
-                {
-                    throw new ArgumentException("Item does not support downloading");
+                    break;
                 }
             }
 
-            if (user != null)
-            {
-                await LogDownloadAsync(item, user, auth).ConfigureAwait(false);
-            }
+            baseItemDtos.Add(_dtoService.GetBaseItemDto(parent, dtoOptions, user));
 
-            var path = item.Path;
-
-            // Quotes are valid in linux. They'll possibly cause issues here
-            var filename = (Path.GetFileName(path) ?? string.Empty).Replace("\"", string.Empty, StringComparison.Ordinal);
-            if (!string.IsNullOrWhiteSpace(filename))
-            {
-                // Kestrel doesn't support non-ASCII characters in headers
-                if (Regex.IsMatch(filename, @"[^\p{IsBasicLatin}]"))
-                {
-                    // Manually encoding non-ASCII characters, following https://tools.ietf.org/html/rfc5987#section-3.2.2
-                    filename = WebUtility.UrlEncode(filename);
-                }
-            }
-
-            // TODO determine non-ASCII validity.
-            return PhysicalFile(path, MimeTypes.GetMimeType(path), filename, true);
+            parent = parent.GetParent();
         }
 
-        /// <summary>
-        /// Gets similar items.
-        /// </summary>
-        /// <param name="itemId">The item id.</param>
-        /// <param name="excludeArtistIds">Exclude artist ids.</param>
-        /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
-        /// <param name="limit">Optional. The maximum number of records to return.</param>
-        /// <param name="fields">Optional. Specify additional fields of information to return in the output. This allows multiple, comma delimited. Options: Budget, Chapters, DateCreated, Genres, HomePageUrl, IndexOptions, MediaStreams, Overview, ParentId, Path, People, ProviderIds, PrimaryImageAspectRatio, Revenue, SortName, Studios, Taglines, TrailerUrls.</param>
-        /// <response code="200">Similar items returned.</response>
-        /// <returns>A <see cref="QueryResult{BaseItemDto}"/> containing the similar items.</returns>
-        [HttpGet("Artists/{itemId}/Similar", Name = "GetSimilarArtists")]
-        [HttpGet("Items/{itemId}/Similar")]
-        [HttpGet("Albums/{itemId}/Similar", Name = "GetSimilarAlbums")]
-        [HttpGet("Shows/{itemId}/Similar", Name = "GetSimilarShows")]
-        [HttpGet("Movies/{itemId}/Similar", Name = "GetSimilarMovies")]
-        [HttpGet("Trailers/{itemId}/Similar", Name = "GetSimilarTrailers")]
-        [Authorize(Policy = Policies.DefaultAuthorization)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<QueryResult<BaseItemDto>> GetSimilarItems(
-            [FromRoute, Required] Guid itemId,
-            [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] Guid[] excludeArtistIds,
-            [FromQuery] Guid? userId,
-            [FromQuery] int? limit,
-            [FromQuery, ModelBinder(typeof(CommaDelimitedArrayModelBinder))] ItemFields[] fields)
+        return baseItemDtos;
+    }
+
+    /// <summary>
+    /// Gets a list of physical paths from virtual folders.
+    /// </summary>
+    /// <response code="200">Physical paths returned.</response>
+    /// <returns>List of physical paths.</returns>
+    [HttpGet("Library/PhysicalPaths")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<IEnumerable<string>> GetPhysicalPaths()
+    {
+        return Ok(_libraryManager.RootFolder.Children
+            .SelectMany(c => c.PhysicalLocations));
+    }
+
+    /// <summary>
+    /// Gets all user media folders.
+    /// </summary>
+    /// <param name="isHidden">Optional. Filter by folders that are marked hidden, or not.</param>
+    /// <response code="200">Media folders returned.</response>
+    /// <returns>List of user media folders.</returns>
+    [HttpGet("Library/MediaFolders")]
+    [Authorize(Policy = Policies.RequiresElevation)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<QueryResult<BaseItemDto>> GetMediaFolders([FromQuery] bool? isHidden)
+    {
+        var items = _libraryManager.GetUserRootFolder().Children
+            .Concat(_libraryManager.RootFolder.VirtualChildren)
+            .Where(i => _libraryManager.GetLibraryOptions(i).Enabled)
+            .OrderBy(i => i.SortName)
+            .ToList();
+
+        if (isHidden.HasValue)
         {
-            var item = itemId.Equals(Guid.Empty)
-                ? (!userId.Equals(Guid.Empty)
-                    ? _libraryManager.GetUserRootFolder()
-                    : _libraryManager.RootFolder)
-                : _libraryManager.GetItemById(itemId);
+            var val = isHidden.Value;
 
-            if (item is Episode || (item is IItemByName && !(item is MusicArtist)))
-            {
-                return new QueryResult<BaseItemDto>();
-            }
-
-            var user = userId.HasValue && !userId.Equals(Guid.Empty)
-                ? _userManager.GetUserById(userId.Value)
-                : null;
-            var dtoOptions = new DtoOptions { Fields = fields }
-                .AddClientFields(Request);
-
-            var program = item as IHasProgramAttributes;
-            bool? isMovie = item is Movie || (program != null && program.IsMovie) || item is Trailer;
-            bool? isSeries = item is Series || (program != null && program.IsSeries);
-
-            var includeItemTypes = new List<string>();
-            if (isMovie.Value)
-            {
-                includeItemTypes.Add(nameof(Movie));
-                if (_serverConfigurationManager.Configuration.EnableExternalContentInSuggestions)
-                {
-                    includeItemTypes.Add(nameof(Trailer));
-                    includeItemTypes.Add(nameof(LiveTvProgram));
-                }
-            }
-            else if (isSeries.Value)
-            {
-                includeItemTypes.Add(nameof(Series));
-            }
-            else
-            {
-                // For non series and movie types these columns are typically null
-                isSeries = null;
-                isMovie = null;
-                includeItemTypes.Add(item.GetType().Name);
-            }
-
-            var query = new InternalItemsQuery(user)
-            {
-                Limit = limit,
-                IncludeItemTypes = includeItemTypes.ToArray(),
-                SimilarTo = item,
-                DtoOptions = dtoOptions,
-                EnableTotalRecordCount = !isMovie ?? true,
-                EnableGroupByMetadataKey = isMovie ?? false,
-                MinSimilarityScore = 2 // A remnant from album/artist scoring
-            };
-
-            // ExcludeArtistIds
-            if (excludeArtistIds.Length != 0)
-            {
-                query.ExcludeArtistIds = excludeArtistIds;
-            }
-
-            List<BaseItem> itemsResult = _libraryManager.GetItemList(query);
-
-            var returnList = _dtoService.GetBaseItemDtos(itemsResult, dtoOptions, user);
-
-            return new QueryResult<BaseItemDto>
-            {
-                Items = returnList,
-                TotalRecordCount = itemsResult.Count
-            };
+            items = items.Where(i => i.IsHidden == val).ToList();
         }
 
-        /// <summary>
-        /// Gets the library options info.
-        /// </summary>
-        /// <param name="libraryContentType">Library content type.</param>
-        /// <param name="isNewLibrary">Whether this is a new library.</param>
-        /// <response code="200">Library options info returned.</response>
-        /// <returns>Library options info.</returns>
-        [HttpGet("Libraries/AvailableOptions")]
-        [Authorize(Policy = Policies.FirstTimeSetupOrDefault)]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public ActionResult<LibraryOptionsResultDto> GetLibraryOptionsInfo(
-            [FromQuery] string? libraryContentType,
-            [FromQuery] bool isNewLibrary = false)
+        var dtoOptions = new DtoOptions();
+        var resultArray = _dtoService.GetBaseItemDtos(items, dtoOptions);
+        return new QueryResult<BaseItemDto>(resultArray);
+    }
+
+    /// <summary>
+    /// Reports that new episodes of a series have been added by an external source.
+    /// </summary>
+    /// <param name="tvdbId">The tvdbId.</param>
+    /// <response code="204">Report success.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpPost("Library/Series/Added", Name = "PostAddedSeries")]
+    [HttpPost("Library/Series/Updated")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public ActionResult PostUpdatedSeries([FromQuery] string? tvdbId)
+    {
+        var series = _libraryManager.GetItemList(new InternalItemsQuery
         {
-            var result = new LibraryOptionsResultDto();
-
-            var types = GetRepresentativeItemTypes(libraryContentType);
-            var typesList = types.ToList();
-
-            var plugins = _providerManager.GetAllMetadataPlugins()
-                .Where(i => types.Contains(i.ItemType, StringComparer.OrdinalIgnoreCase))
-                .OrderBy(i => typesList.IndexOf(i.ItemType))
-                .ToList();
-
-            result.MetadataSavers = plugins
-                .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.MetadataSaver))
-                .Select(i => new LibraryOptionInfoDto
-                {
-                    Name = i.Name,
-                    DefaultEnabled = IsSaverEnabledByDefault(i.Name, types, isNewLibrary)
-                })
-                .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.First())
-                .ToArray();
-
-            result.MetadataReaders = plugins
-                .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.LocalMetadataProvider))
-                .Select(i => new LibraryOptionInfoDto
-                {
-                    Name = i.Name,
-                    DefaultEnabled = true
-                })
-                .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.First())
-                .ToArray();
-
-            result.SubtitleFetchers = plugins
-                .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.SubtitleFetcher))
-                .Select(i => new LibraryOptionInfoDto
-                {
-                    Name = i.Name,
-                    DefaultEnabled = true
-                })
-                .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.First())
-                .ToArray();
-
-            var typeOptions = new List<LibraryTypeOptionsDto>();
-
-            foreach (var type in types)
+            IncludeItemTypes = new[] { BaseItemKind.Series },
+            DtoOptions = new DtoOptions(false)
             {
-                TypeOptions.DefaultImageOptions.TryGetValue(type, out var defaultImageOptions);
+                EnableImages = false
+            }
+        }).Where(i => string.Equals(tvdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Tvdb), StringComparison.OrdinalIgnoreCase)).ToArray();
 
-                typeOptions.Add(new LibraryTypeOptionsDto
-                {
-                    Type = type,
+        foreach (var item in series)
+        {
+            _libraryMonitor.ReportFileSystemChanged(item.Path);
+        }
 
-                    MetadataFetchers = plugins
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Reports that new movies have been added by an external source.
+    /// </summary>
+    /// <param name="tmdbId">The tmdbId.</param>
+    /// <param name="imdbId">The imdbId.</param>
+    /// <response code="204">Report success.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpPost("Library/Movies/Added", Name = "PostAddedMovies")]
+    [HttpPost("Library/Movies/Updated")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public ActionResult PostUpdatedMovies([FromQuery] string? tmdbId, [FromQuery] string? imdbId)
+    {
+        var movies = _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            IncludeItemTypes = new[] { BaseItemKind.Movie },
+            DtoOptions = new DtoOptions(false)
+            {
+                EnableImages = false
+            }
+        });
+
+        if (!string.IsNullOrWhiteSpace(imdbId))
+        {
+            movies = movies.Where(i => string.Equals(imdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Imdb), StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+        else if (!string.IsNullOrWhiteSpace(tmdbId))
+        {
+            movies = movies.Where(i => string.Equals(tmdbId, i.GetProviderId(MediaBrowser.Model.Entities.MetadataProvider.Tmdb), StringComparison.OrdinalIgnoreCase)).ToList();
+        }
+        else
+        {
+            movies = new List<BaseItem>();
+        }
+
+        foreach (var item in movies)
+        {
+            _libraryMonitor.ReportFileSystemChanged(item.Path);
+        }
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Reports that new movies have been added by an external source.
+    /// </summary>
+    /// <param name="dto">The update paths.</param>
+    /// <response code="204">Report success.</response>
+    /// <returns>A <see cref="NoContentResult"/>.</returns>
+    [HttpPost("Library/Media/Updated")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public ActionResult PostUpdatedMedia([FromBody, Required] MediaUpdateInfoDto dto)
+    {
+        foreach (var item in dto.Updates)
+        {
+            _libraryMonitor.ReportFileSystemChanged(item.Path ?? throw new ArgumentException("Item path can't be null."));
+        }
+
+        return NoContent();
+    }
+
+    /// <summary>
+    /// Downloads item media.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <response code="200">Media downloaded.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>A <see cref="FileResult"/> containing the media stream.</returns>
+    /// <exception cref="ArgumentException">User can't download or item can't be downloaded.</exception>
+    [HttpGet("Items/{itemId}/Download")]
+    [Authorize(Policy = Policies.Download)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesFile("video/*", "audio/*")]
+    public async Task<ActionResult> GetDownload([FromRoute, Required] Guid itemId)
+    {
+        var userId = User.GetUserId();
+        var user = userId.IsEmpty()
+            ? null
+            : _userManager.GetUserById(userId);
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        if (user is not null)
+        {
+            if (!item.CanDownload(user))
+            {
+                throw new ArgumentException("Item does not support downloading");
+            }
+        }
+        else
+        {
+            if (!item.CanDownload())
+            {
+                throw new ArgumentException("Item does not support downloading");
+            }
+        }
+
+        if (user is not null)
+        {
+            await LogDownloadAsync(item, user).ConfigureAwait(false);
+        }
+
+        // Quotes are valid in linux. They'll possibly cause issues here.
+        var filename = Path.GetFileName(item.Path)?.Replace("\"", string.Empty, StringComparison.Ordinal);
+
+        var filePath = item.Path;
+        if (item.IsFileProtocol)
+        {
+            // PhysicalFile does not work well with symlinks at the moment.
+            var resolved = FileSystemHelper.ResolveLinkTarget(filePath, returnFinalTarget: true);
+            if (resolved is not null && resolved.Exists)
+            {
+                filePath = resolved.FullName;
+            }
+        }
+
+        return PhysicalFile(filePath, MimeTypes.GetMimeType(filePath), filename, true);
+    }
+
+    /// <summary>
+    /// Gets the collections that include the specified item.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="startIndex">Optional. The index of the first record in the output.</param>
+    /// <param name="limit">Optional. The maximum number of records to return.</param>
+    /// <param name="fields">Optional. Specify additional fields of information to return in the output.</param>
+    /// <response code="200">Collections returned.</response>
+    /// <response code="401">User context missing.</response>
+    /// <response code="404">Item not found.</response>
+    /// <returns>The collections that contain the requested item.</returns>
+    [HttpGet("Items/{itemId}/Collections")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public ActionResult<QueryResult<BaseItemDto>> GetItemCollections(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery] Guid? userId,
+        [FromQuery] int? startIndex,
+        [FromQuery] int? limit,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+
+        if (user is null)
+        {
+            return Unauthorized();
+        }
+
+        var item = _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        var dtoOptions = new DtoOptions { Fields = fields };
+
+        var visibleCollections = _collectionManager
+            .GetCollectionsContainingItem(user, item.Id)
+            .OrderBy(i => i.SortName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        IEnumerable<BaseItem> pagedCollections = visibleCollections;
+        if (startIndex.HasValue)
+        {
+            pagedCollections = pagedCollections.Skip(startIndex.Value);
+        }
+
+        if (limit.HasValue)
+        {
+            pagedCollections = pagedCollections.Take(limit.Value);
+        }
+
+        var dtos = _dtoService.GetBaseItemDtos(pagedCollections.ToList(), dtoOptions, user);
+
+        return new QueryResult<BaseItemDto>(
+            startIndex,
+            visibleCollections.Count,
+            dtos);
+    }
+
+    /// <summary>
+    /// Gets similar items.
+    /// </summary>
+    /// <param name="itemId">The item id.</param>
+    /// <param name="excludeArtistIds">Exclude artist ids.</param>
+    /// <param name="userId">Optional. Filter by user id, and attach user data.</param>
+    /// <param name="limit">Optional. The maximum number of records to return.</param>
+    /// <param name="fields">Optional. Specify additional fields of information to return in the output. This allows multiple, comma delimited. Options: Budget, Chapters, DateCreated, Genres, HomePageUrl, IndexOptions, MediaStreams, Overview, ParentId, Path, People, ProviderIds, PrimaryImageAspectRatio, Revenue, SortName, Studios, Taglines, TrailerUrls.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <response code="200">Similar items returned.</response>
+    /// <returns>A <see cref="QueryResult{BaseItemDto}"/> containing the similar items.</returns>
+    [HttpGet("Artists/{itemId}/Similar", Name = "GetSimilarArtists")]
+    [HttpGet("Items/{itemId}/Similar")]
+    [HttpGet("Albums/{itemId}/Similar", Name = "GetSimilarAlbums")]
+    [HttpGet("Shows/{itemId}/Similar", Name = "GetSimilarShows")]
+    [HttpGet("Movies/{itemId}/Similar", Name = "GetSimilarMovies")]
+    [HttpGet("Trailers/{itemId}/Similar", Name = "GetSimilarTrailers")]
+    [Authorize]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<QueryResult<BaseItemDto>>> GetSimilarItems(
+        [FromRoute, Required] Guid itemId,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] Guid[] excludeArtistIds,
+        [FromQuery] Guid? userId,
+        [FromQuery] int? limit,
+        [FromQuery, ModelBinder(typeof(CommaDelimitedCollectionModelBinder))] ItemFields[] fields,
+        CancellationToken cancellationToken)
+    {
+        userId = RequestHelpers.GetUserId(User, userId);
+        var user = userId.IsNullOrEmpty()
+            ? null
+            : _userManager.GetUserById(userId.Value);
+        var item = itemId.IsEmpty()
+            ? (user is null
+                ? _libraryManager.RootFolder
+                : _libraryManager.GetUserRootFolder())
+            : _libraryManager.GetItemById<BaseItem>(itemId, user);
+        if (item is null)
+        {
+            return NotFound();
+        }
+
+        if (item is Episode || (item is IItemByName && item is not MusicArtist))
+        {
+            return new QueryResult<BaseItemDto>();
+        }
+
+        var dtoOptions = new DtoOptions { Fields = fields };
+
+        // Get library options for provider configuration
+        var libraryOptions = _libraryManager.GetLibraryOptions(item);
+
+        var itemsResult = await _similarItemsManager.GetSimilarItemsAsync(
+            item,
+            excludeArtistIds,
+            user,
+            dtoOptions,
+            limit,
+            libraryOptions,
+            cancellationToken).ConfigureAwait(false);
+
+        var returnList = _dtoService.GetBaseItemDtos(itemsResult, dtoOptions, user);
+
+        return new QueryResult<BaseItemDto>(
+            0,
+            itemsResult.Count,
+            returnList);
+    }
+
+    /// <summary>
+    /// Gets the library options info.
+    /// </summary>
+    /// <param name="libraryContentType">Library content type.</param>
+    /// <param name="isNewLibrary">Whether this is a new library.</param>
+    /// <response code="200">Library options info returned.</response>
+    /// <returns>Library options info.</returns>
+    [HttpGet("Libraries/AvailableOptions")]
+    [Authorize(Policy = Policies.FirstTimeSetupOrDefault)]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public ActionResult<LibraryOptionsResultDto> GetLibraryOptionsInfo(
+        [FromQuery] CollectionType? libraryContentType,
+        [FromQuery] bool isNewLibrary = false)
+    {
+        var result = new LibraryOptionsResultDto();
+
+        var types = GetRepresentativeItemTypes(libraryContentType);
+        var typesList = types.ToList();
+
+        var plugins = _providerManager.GetAllMetadataPlugins()
+            .Where(i => types.Contains(i.ItemType, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(i => typesList.IndexOf(i.ItemType))
+            .ToList();
+
+        result.MetadataSavers = plugins
+            .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.MetadataSaver))
+            .Select(i => new LibraryOptionInfoDto
+            {
+                Name = i.Name,
+                DefaultEnabled = IsSaverEnabledByDefault(i.Name, types, isNewLibrary)
+            })
+            .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        result.MetadataReaders = plugins
+            .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.LocalMetadataProvider))
+            .Select(i => new LibraryOptionInfoDto
+            {
+                Name = i.Name,
+                DefaultEnabled = true
+            })
+            .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        result.SubtitleFetchers = plugins
+            .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.SubtitleFetcher))
+            .Select(i => new LibraryOptionInfoDto
+            {
+                Name = i.Name,
+                DefaultEnabled = true
+            })
+            .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        result.LyricFetchers = plugins
+            .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.LyricFetcher))
+            .Select(i => new LibraryOptionInfoDto
+            {
+                Name = i.Name,
+                DefaultEnabled = true
+            })
+            .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        result.MediaSegmentProviders = plugins
+            .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.MediaSegmentProvider))
+            .Select(i => new LibraryOptionInfoDto
+            {
+                Name = i.Name,
+                DefaultEnabled = true
+            })
+            .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var typeOptions = new List<LibraryTypeOptionsDto>();
+
+        foreach (var type in types)
+        {
+            TypeOptions.DefaultImageOptions.TryGetValue(type, out var defaultImageOptions);
+
+            typeOptions.Add(new LibraryTypeOptionsDto
+            {
+                Type = type,
+
+                MetadataFetchers = plugins
                     .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
                     .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.MetadataFetcher))
                     .Select(i => new LibraryOptionInfoDto
@@ -840,11 +946,10 @@ namespace Jellyfin.Api.Controllers
                         Name = i.Name,
                         DefaultEnabled = IsMetadataFetcherEnabledByDefault(i.Name, type, isNewLibrary)
                     })
-                    .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.First())
+                    .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
                     .ToArray(),
 
-                    ImageFetchers = plugins
+                ImageFetchers = plugins
                     .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
                     .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.ImageFetcher))
                     .Select(i => new LibraryOptionInfoDto
@@ -852,152 +957,132 @@ namespace Jellyfin.Api.Controllers
                         Name = i.Name,
                         DefaultEnabled = IsImageFetcherEnabledByDefault(i.Name, type, isNewLibrary)
                     })
-                    .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                    .Select(x => x.First())
+                    .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
                     .ToArray(),
 
-                    SupportedImageTypes = plugins
+                SimilarItemProviders = plugins
+                    .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
+                    .SelectMany(i => i.Plugins.Where(p => p.Type == MetadataPluginType.LocalSimilarityProvider || p.Type == MetadataPluginType.SimilarityProvider))
+                    .Select(i => new LibraryOptionInfoDto
+                    {
+                        Name = i.Name,
+                        DefaultEnabled = i.Type == MetadataPluginType.LocalSimilarityProvider
+                    })
+                    .DistinctBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                    .ToArray(),
+
+                SupportedImageTypes = plugins
                     .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
                     .SelectMany(i => i.SupportedImageTypes ?? Array.Empty<ImageType>())
                     .Distinct()
                     .ToArray(),
 
-                    DefaultImageOptions = defaultImageOptions ?? Array.Empty<ImageOption>()
-                });
-            }
-
-            result.TypeOptions = typeOptions.ToArray();
-
-            return result;
+                DefaultImageOptions = defaultImageOptions ?? Array.Empty<ImageOption>()
+            });
         }
 
-        private int GetCount(Type type, User? user, bool? isFavorite)
-        {
-            var query = new InternalItemsQuery(user)
-            {
-                IncludeItemTypes = new[] { type.Name },
-                Limit = 0,
-                Recursive = true,
-                IsVirtualItem = false,
-                IsFavorite = isFavorite,
-                DtoOptions = new DtoOptions(false)
-                {
-                    EnableImages = false
-                }
-            };
+        result.TypeOptions = typeOptions.ToArray();
 
-            return _libraryManager.GetItemsResult(query).TotalRecordCount;
+        return result;
+    }
+
+    private BaseItem? TranslateParentItem(BaseItem item, User user)
+    {
+        return item.GetParent() is AggregateFolder
+            ? _libraryManager.GetUserRootFolder().GetChildren(user, true)
+                .FirstOrDefault(i => i.PhysicalLocations.Contains(item.Path))
+            : item;
+    }
+
+    private async Task LogDownloadAsync(BaseItem item, User user)
+    {
+        try
+        {
+            await _activityManager.CreateAsync(new ActivityLog(
+                string.Format(CultureInfo.InvariantCulture, _localization.GetServerLocalizedString("UserDownloadingItemWithValues"), user.Username, item.Name),
+                "UserDownloadingContent",
+                User.GetUserId())
+            {
+                ShortOverview = string.Format(CultureInfo.InvariantCulture, _localization.GetServerLocalizedString("AppDeviceValues"), User.GetClient(), User.GetDevice()),
+                ItemId = item.Id.ToString("N", CultureInfo.InvariantCulture)
+            }).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Logged at lower levels
+        }
+    }
+
+    private static string[] GetRepresentativeItemTypes(CollectionType? contentType)
+    {
+        return contentType switch
+        {
+            CollectionType.boxsets => new[] { "BoxSet" },
+            CollectionType.playlists => new[] { "Playlist" },
+            CollectionType.movies => new[] { "Movie" },
+            CollectionType.tvshows => new[] { "Series", "Season", "Episode" },
+            CollectionType.books => new[] { "Book", "AudioBook" },
+            CollectionType.music => new[] { "MusicArtist", "MusicAlbum", "Audio", "MusicVideo" },
+            CollectionType.homevideos => new[] { "Video", "Photo" },
+            CollectionType.photos => new[] { "Video", "Photo" },
+            CollectionType.musicvideos => new[] { "MusicVideo" },
+            _ => new[] { "Series", "Season", "Episode", "Movie" }
+        };
+    }
+
+    private bool IsSaverEnabledByDefault(string name, string[] itemTypes, bool isNewLibrary)
+    {
+        if (isNewLibrary)
+        {
+            return false;
         }
 
-        private BaseItem? TranslateParentItem(BaseItem item, User user)
+        var metadataOptions = _serverConfigurationManager.Configuration.MetadataOptions
+            .Where(i => itemTypes.Contains(i.ItemType ?? string.Empty, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+
+        return metadataOptions.Length == 0 || metadataOptions.Any(i => !i.DisabledMetadataSavers.Contains(name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private bool IsMetadataFetcherEnabledByDefault(string name, string type, bool isNewLibrary)
+    {
+        if (isNewLibrary)
         {
-            return item.GetParent() is AggregateFolder
-                ? _libraryManager.GetUserRootFolder().GetChildren(user, true)
-                    .FirstOrDefault(i => i.PhysicalLocations.Contains(item.Path))
-                : item;
-        }
-
-        private async Task LogDownloadAsync(BaseItem item, User user, AuthorizationInfo auth)
-        {
-            try
+            if (string.Equals(name, "TheMovieDb", StringComparison.OrdinalIgnoreCase))
             {
-                await _activityManager.CreateAsync(new ActivityLog(
-                    string.Format(CultureInfo.InvariantCulture, _localization.GetLocalizedString("UserDownloadingItemWithValues"), user.Username, item.Name),
-                    "UserDownloadingContent",
-                    auth.UserId)
-                {
-                    ShortOverview = string.Format(CultureInfo.InvariantCulture, _localization.GetLocalizedString("AppDeviceValues"), auth.Client, auth.Device),
-                }).ConfigureAwait(false);
-            }
-            catch
-            {
-                // Logged at lower levels
-            }
-        }
-
-        private static string[] GetRepresentativeItemTypes(string? contentType)
-        {
-            return contentType switch
-            {
-                CollectionType.BoxSets => new[] { "BoxSet" },
-                CollectionType.Playlists => new[] { "Playlist" },
-                CollectionType.Movies => new[] { "Movie" },
-                CollectionType.TvShows => new[] { "Series", "Season", "Episode" },
-                CollectionType.Books => new[] { "Book" },
-                CollectionType.Music => new[] { "MusicArtist", "MusicAlbum", "Audio", "MusicVideo" },
-                CollectionType.HomeVideos => new[] { "Video", "Photo" },
-                CollectionType.Photos => new[] { "Video", "Photo" },
-                CollectionType.MusicVideos => new[] { "MusicVideo" },
-                _ => new[] { "Series", "Season", "Episode", "Movie" }
-            };
-        }
-
-        private bool IsSaverEnabledByDefault(string name, string[] itemTypes, bool isNewLibrary)
-        {
-            if (isNewLibrary)
-            {
-                return false;
-            }
-
-            var metadataOptions = _serverConfigurationManager.Configuration.MetadataOptions
-                .Where(i => itemTypes.Contains(i.ItemType ?? string.Empty, StringComparer.OrdinalIgnoreCase))
-                .ToArray();
-
-            return metadataOptions.Length == 0 || metadataOptions.Any(i => !i.DisabledMetadataSavers.Contains(name, StringComparer.OrdinalIgnoreCase));
-        }
-
-        private bool IsMetadataFetcherEnabledByDefault(string name, string type, bool isNewLibrary)
-        {
-            if (isNewLibrary)
-            {
-                if (string.Equals(name, "TheMovieDb", StringComparison.OrdinalIgnoreCase))
-                {
-                    return !(string.Equals(type, "Season", StringComparison.OrdinalIgnoreCase)
+                return !(string.Equals(type, "Season", StringComparison.OrdinalIgnoreCase)
                          || string.Equals(type, "Episode", StringComparison.OrdinalIgnoreCase)
                          || string.Equals(type, "MusicVideo", StringComparison.OrdinalIgnoreCase));
-                }
+            }
 
-                return string.Equals(name, "TheTVDB", StringComparison.OrdinalIgnoreCase)
+            return string.Equals(name, "TheTVDB", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(name, "TheAudioDB", StringComparison.OrdinalIgnoreCase)
                    || string.Equals(name, "MusicBrainz", StringComparison.OrdinalIgnoreCase);
-            }
-
-            var metadataOptions = _serverConfigurationManager.Configuration.MetadataOptions
-                .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-
-            return metadataOptions.Length == 0
-               || metadataOptions.Any(i => !i.DisabledMetadataFetchers.Contains(name, StringComparer.OrdinalIgnoreCase));
         }
 
-        private bool IsImageFetcherEnabledByDefault(string name, string type, bool isNewLibrary)
+        var metadataOptions = _serverConfigurationManager.GetMetadataOptionsForType(type);
+        return metadataOptions is null || !metadataOptions.DisabledMetadataFetchers.Contains(name, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private bool IsImageFetcherEnabledByDefault(string name, string type, bool isNewLibrary)
+    {
+        if (isNewLibrary)
         {
-            if (isNewLibrary)
+            if (string.Equals(name, "TheMovieDb", StringComparison.OrdinalIgnoreCase))
             {
-                if (string.Equals(name, "TheMovieDb", StringComparison.OrdinalIgnoreCase))
-                {
-                    return !string.Equals(type, "Series", StringComparison.OrdinalIgnoreCase)
-                           && !string.Equals(type, "Season", StringComparison.OrdinalIgnoreCase)
-                           && !string.Equals(type, "Episode", StringComparison.OrdinalIgnoreCase)
-                           && !string.Equals(type, "MusicVideo", StringComparison.OrdinalIgnoreCase);
-                }
-
-                return string.Equals(name, "TheTVDB", StringComparison.OrdinalIgnoreCase)
-                       || string.Equals(name, "Screen Grabber", StringComparison.OrdinalIgnoreCase)
-                       || string.Equals(name, "TheAudioDB", StringComparison.OrdinalIgnoreCase)
-                       || string.Equals(name, "Image Extractor", StringComparison.OrdinalIgnoreCase);
+                return !string.Equals(type, "Series", StringComparison.OrdinalIgnoreCase)
+                       && !string.Equals(type, "Season", StringComparison.OrdinalIgnoreCase)
+                       && !string.Equals(type, "Episode", StringComparison.OrdinalIgnoreCase)
+                       && !string.Equals(type, "MusicVideo", StringComparison.OrdinalIgnoreCase);
             }
 
-            var metadataOptions = _serverConfigurationManager.Configuration.MetadataOptions
-                .Where(i => string.Equals(i.ItemType, type, StringComparison.OrdinalIgnoreCase))
-                .ToArray();
-
-            if (metadataOptions.Length == 0)
-            {
-                return true;
-            }
-
-            return metadataOptions.Any(i => !i.DisabledImageFetchers.Contains(name, StringComparer.OrdinalIgnoreCase));
+            return string.Equals(name, "TheTVDB", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(name, "Screen Grabber", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(name, "TheAudioDB", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(name, "Image Extractor", StringComparison.OrdinalIgnoreCase);
         }
+
+        var metadataOptions = _serverConfigurationManager.GetMetadataOptionsForType(type);
+        return metadataOptions is null || !metadataOptions.DisabledImageFetchers.Contains(name, StringComparison.OrdinalIgnoreCase);
     }
 }

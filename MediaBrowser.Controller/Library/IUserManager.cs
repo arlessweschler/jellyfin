@@ -1,12 +1,10 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
 using Jellyfin.Data.Events;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Users;
@@ -26,18 +24,19 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// Gets the users.
         /// </summary>
-        /// <value>The users.</value>
-        IEnumerable<User> Users { get; }
+        /// <returns>The users.</returns>
+        IEnumerable<User> GetUsers();
 
         /// <summary>
         /// Gets the user ids.
         /// </summary>
-        /// <value>The users ids.</value>
-        IEnumerable<Guid> UsersIds { get; }
+        /// <returns>The users ids.</returns>
+        IEnumerable<Guid> GetUsersIds();
 
         /// <summary>
         /// Initializes the user manager and ensures that a user exists.
         /// </summary>
+        /// <returns>Awaitable task.</returns>
         Task InitializeAsync();
 
         /// <summary>
@@ -46,32 +45,31 @@ namespace MediaBrowser.Controller.Library
         /// <param name="id">The id.</param>
         /// <returns>The user with the specified Id, or <c>null</c> if the user doesn't exist.</returns>
         /// <exception cref="ArgumentException"><c>id</c> is an empty Guid.</exception>
-        User GetUserById(Guid id);
+        User? GetUserById(Guid id);
+
+        /// <summary>
+        /// Gets the first available user.
+        /// </summary>
+        /// <returns>The first user, or <c>null</c> if no users exist.</returns>
+        User? GetFirstUser();
 
         /// <summary>
         /// Gets the name of the user by.
         /// </summary>
         /// <param name="name">The name.</param>
         /// <returns>User.</returns>
-        User GetUserByName(string name);
+        User? GetUserByName(string name);
 
         /// <summary>
         /// Renames the user.
         /// </summary>
-        /// <param name="user">The user.</param>
+        /// <param name="userId">The UserId to change.</param>
+        /// <param name="oldName">The old Username.</param>
         /// <param name="newName">The new name.</param>
         /// <returns>Task.</returns>
         /// <exception cref="ArgumentNullException">If user is <c>null</c>.</exception>
         /// <exception cref="ArgumentException">If the provided user doesn't exist.</exception>
-        Task RenameUser(User user, string newName);
-
-        /// <summary>
-        /// Updates the user.
-        /// </summary>
-        /// <param name="user">The user.</param>
-        /// <exception cref="ArgumentNullException">If user is <c>null</c>.</exception>
-        /// <exception cref="ArgumentException">If the provided user doesn't exist.</exception>
-        void UpdateUser(User user);
+        Task RenameUser(Guid userId, string oldName, string newName);
 
         /// <summary>
         /// Updates the user.
@@ -101,26 +99,17 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// Resets the password.
         /// </summary>
-        /// <param name="user">The user.</param>
+        /// <param name="userId">The users Id.</param>
         /// <returns>Task.</returns>
-        Task ResetPassword(User user);
-
-        /// <summary>
-        /// Resets the easy password.
-        /// </summary>
-        /// <param name="user">The user.</param>
-        /// <returns>Task.</returns>
-        void ResetEasyPassword(User user);
+        Task ResetPassword(Guid userId);
 
         /// <summary>
         /// Changes the password.
         /// </summary>
-        Task ChangePassword(User user, string newPassword);
-
-        /// <summary>
-        /// Changes the easy password.
-        /// </summary>
-        void ChangeEasyPassword(User user, string newPassword, string newPasswordSha1);
+        /// <param name="userId">The users id.</param>
+        /// <param name="newPassword">New password to use.</param>
+        /// <returns>Awaitable task.</returns>
+        Task ChangePassword(Guid userId, string newPassword);
 
         /// <summary>
         /// Gets the user dto.
@@ -128,12 +117,17 @@ namespace MediaBrowser.Controller.Library
         /// <param name="user">The user.</param>
         /// <param name="remoteEndPoint">The remote end point.</param>
         /// <returns>UserDto.</returns>
-        UserDto GetUserDto(User user, string remoteEndPoint = null);
+        UserDto GetUserDto(User user, string? remoteEndPoint = null);
 
         /// <summary>
         /// Authenticates the user.
         /// </summary>
-        Task<User> AuthenticateUser(string username, string password, string passwordSha1, string remoteEndPoint, bool isUserSession);
+        /// <param name="username">The user.</param>
+        /// <param name="password">The password to use.</param>
+        /// <param name="remoteEndPoint">Remove endpoint to use.</param>
+        /// <param name="isUserSession">Specifies if a user session.</param>
+        /// <returns>User wrapped in awaitable task.</returns>
+        Task<User?> AuthenticateUser(string username, string password, string remoteEndPoint, bool isUserSession);
 
         /// <summary>
         /// Starts the forgot password process.
@@ -157,7 +151,7 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// This method updates the user's configuration.
         /// This is only included as a stopgap until the new API, using this internally is not recommended.
-        /// Instead, modify the user object directly, then call <see cref="UpdateUser"/>.
+        /// Instead, modify the user object directly, then call <see cref="UpdateUserAsync"/>.
         /// </summary>
         /// <param name="userId">The user's Id.</param>
         /// <param name="config">The request containing the new user configuration.</param>
@@ -167,7 +161,7 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// This method updates the user's policy.
         /// This is only included as a stopgap until the new API, using this internally is not recommended.
-        /// Instead, modify the user object directly, then call <see cref="UpdateUser"/>.
+        /// Instead, modify the user object directly, then call <see cref="UpdateUserAsync"/>.
         /// </summary>
         /// <param name="userId">The user's Id.</param>
         /// <param name="policy">The request containing the new user policy.</param>

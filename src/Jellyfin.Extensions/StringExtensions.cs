@@ -1,0 +1,214 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+using ICU4N.Text;
+
+namespace Jellyfin.Extensions
+{
+    /// <summary>
+    /// Provides extensions methods for <see cref="string" />.
+    /// </summary>
+    public static partial class StringExtensions
+    {
+        private static readonly Lazy<string> _transliteratorId = new(() =>
+            Environment.GetEnvironmentVariable("JELLYFIN_TRANSLITERATOR_ID")
+            ?? "Any-Latin; Latin-Ascii; Lower; NFD; [:Nonspacing Mark:] Remove; [:Punctuation:] Remove;");
+
+        private static readonly Lazy<Transliterator?> _transliterator = new(() =>
+        {
+            try
+            {
+                return Transliterator.GetInstance(_transliteratorId.Value);
+            }
+            catch (ArgumentException)
+            {
+                return null;
+            }
+        });
+
+        // Matches non-conforming unicode chars
+        // https://mnaoumov.wordpress.com/2014/06/14/stripping-invalid-characters-from-utf-16-strings/
+
+        [GeneratedRegex("([\ud800-\udbff](?![\udc00-\udfff]))|((?<![\ud800-\udbff])[\udc00-\udfff])|(�)")]
+        private static partial Regex NonConformingUnicodeRegex();
+
+        /// <summary>
+        /// Removes the diacritics character from the strings.
+        /// </summary>
+        /// <param name="text">The string to act on.</param>
+        /// <returns>The string without diacritics character.</returns>
+        public static string RemoveDiacritics(this string text)
+            => Diacritics.Extensions.StringExtensions.RemoveDiacritics(
+                NonConformingUnicodeRegex().Replace(text, string.Empty));
+
+        /// <summary>
+        /// Checks whether or not the specified string has diacritics in it.
+        /// </summary>
+        /// <param name="text">The string to check.</param>
+        /// <returns>True if the string has diacritics, false otherwise.</returns>
+        public static bool HasDiacritics(this string text)
+            => Diacritics.Extensions.StringExtensions.HasDiacritics(text)
+                || NonConformingUnicodeRegex().IsMatch(text);
+
+        /// <summary>
+        /// Counts the number of occurrences of [needle] in the string.
+        /// </summary>
+        /// <param name="value">The haystack to search in.</param>
+        /// <param name="needle">The character to search for.</param>
+        /// <returns>The number of occurrences of the [needle] character.</returns>
+        public static int Count(this ReadOnlySpan<char> value, char needle)
+        {
+            var count = 0;
+            var length = value.Length;
+            for (var i = 0; i < length; i++)
+            {
+                if (value[i] == needle)
+                {
+                    count++;
+                }
+            }
+
+            return count;
+        }
+
+        /// <summary>
+        /// Returns the part on the left of the <c>needle</c>.
+        /// </summary>
+        /// <param name="haystack">The string to seek.</param>
+        /// <param name="needle">The needle to find.</param>
+        /// <returns>The part left of the <paramref name="needle" />.</returns>
+        public static ReadOnlySpan<char> LeftPart(this ReadOnlySpan<char> haystack, char needle)
+        {
+            if (haystack.IsEmpty)
+            {
+                return ReadOnlySpan<char>.Empty;
+            }
+
+            var pos = haystack.IndexOf(needle);
+            return pos == -1 ? haystack : haystack[..pos];
+        }
+
+        /// <summary>
+        /// Returns the part on the right of the <c>needle</c>.
+        /// </summary>
+        /// <param name="haystack">The string to seek.</param>
+        /// <param name="needle">The needle to find.</param>
+        /// <returns>The part right of the <paramref name="needle" />.</returns>
+        public static ReadOnlySpan<char> RightPart(this ReadOnlySpan<char> haystack, char needle)
+        {
+            if (haystack.IsEmpty)
+            {
+                return ReadOnlySpan<char>.Empty;
+            }
+
+            var pos = haystack.LastIndexOf(needle);
+            if (pos == -1)
+            {
+                return haystack;
+            }
+
+            if (pos == haystack.Length - 1)
+            {
+                return ReadOnlySpan<char>.Empty;
+            }
+
+            return haystack[(pos + 1)..];
+        }
+
+        /// <summary>
+        /// Returns a transliterated string which only contain ascii characters.
+        /// </summary>
+        /// <param name="text">The string to act on.</param>
+        /// <returns>The transliterated string.</returns>
+        public static string Transliterated(this string text)
+        {
+            return (_transliterator.Value is null) ? text : _transliterator.Value.Transliterate(text);
+        }
+
+        /// <summary>
+        /// Ensures all strings are non-null and trimmed of leading an trailing blanks.
+        /// </summary>
+        /// <param name="values">The enumerable of strings to trim.</param>
+        /// <returns>The enumeration of trimmed strings.</returns>
+        public static IEnumerable<string> Trimmed(this IEnumerable<string?> values)
+        {
+            return values.Select(i => (i ?? string.Empty).Trim());
+        }
+
+        /// <summary>
+        /// Truncates a string at the first null character ('\0').
+        /// </summary>
+        /// <param name="text">The input string.</param>
+        /// <returns>
+        /// The substring up to (but not including) the first null character,
+        /// or the original string if no null character is present.
+        /// </returns>
+        public static string TruncateAtNull(this string text)
+        {
+            return string.IsNullOrEmpty(text) ? text : text.AsSpan().LeftPart('\0').ToString();
+        }
+
+        /// <summary>
+        /// Normalizes a string for comparison by removing diacritics, converting to lowercase,
+        /// replacing punctuation/special characters with spaces, and collapsing whitespace.
+        /// </summary>
+        /// <param name="value">The string to normalize.</param>
+        /// <returns>The normalized string, or the original if null/whitespace.</returns>
+        public static string GetCleanValue(this string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return value;
+            }
+
+            // Remove diacritics and convert to lowercase
+            var cleaned = value.RemoveDiacritics().ToLowerInvariant();
+
+            // Replace all punctuation and special characters with spaces
+            cleaned = Regex.Replace(cleaned, @"[^\p{L}\p{N}\s]", " ");
+
+            // Collapse multiple spaces into single space and trim
+            cleaned = Regex.Replace(cleaned, @"\s+", " ").Trim();
+
+            return cleaned;
+        }
+
+        /// <summary>
+        /// Escapes an argument so that it survives command line parsing as a single argument when it is wrapped in double quotes by the caller.
+        /// </summary>
+        /// <param name="value">The argument to escape.</param>
+        /// <returns>The escaped argument.</returns>
+        public static string EscapeProcessArgument(this string value)
+        {
+            ArgumentNullException.ThrowIfNull(value);
+
+            var span = value.AsSpan();
+            if (!span.Contains('"'))
+            {
+                var trailing = span.Length - span.TrimEnd('\\').Length;
+                return trailing == 0 ? value : string.Concat(value, new string('\\', trailing));
+            }
+
+            var escaped = new StringBuilder(value.Length + 8);
+            var backslashes = 0;
+
+            foreach (var character in span)
+            {
+                if (character == '\\')
+                {
+                    backslashes++;
+                    continue;
+                }
+
+                escaped
+                    .Append('\\', character == '"' ? (backslashes * 2) + 1 : backslashes)
+                    .Append(character);
+                backslashes = 0;
+            }
+
+            return escaped.Append('\\', backslashes * 2).ToString();
+        }
+    }
+}

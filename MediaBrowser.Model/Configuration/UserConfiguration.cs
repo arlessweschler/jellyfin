@@ -1,8 +1,7 @@
-#nullable disable
 #pragma warning disable CS1591
 
 using System;
-using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Enums;
 
 namespace MediaBrowser.Model.Configuration
 {
@@ -23,17 +22,17 @@ namespace MediaBrowser.Model.Configuration
             HidePlayedInLatest = true;
             PlayDefaultAudioTrack = true;
 
-            LatestItemsExcludes = Array.Empty<string>();
-            OrderedViews = Array.Empty<string>();
-            MyMediaExcludes = Array.Empty<string>();
-            GroupedFolders = Array.Empty<string>();
+            LatestItemsExcludes = Array.Empty<Guid>();
+            OrderedViews = Array.Empty<Guid>();
+            MyMediaExcludes = Array.Empty<Guid>();
+            GroupedFolders = Array.Empty<Guid>();
         }
 
         /// <summary>
         /// Gets or sets the audio language preference.
         /// </summary>
         /// <value>The audio language preference.</value>
-        public string AudioLanguagePreference { get; set; }
+        public string? AudioLanguagePreference { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether [play default audio track].
@@ -45,11 +44,11 @@ namespace MediaBrowser.Model.Configuration
         /// Gets or sets the subtitle language preference.
         /// </summary>
         /// <value>The subtitle language preference.</value>
-        public string SubtitleLanguagePreference { get; set; }
+        public string? SubtitleLanguagePreference { get; set; }
 
         public bool DisplayMissingEpisodes { get; set; }
 
-        public string[] GroupedFolders { get; set; }
+        public Guid[] GroupedFolders { get; set; }
 
         public SubtitlePlaybackMode SubtitleMode { get; set; }
 
@@ -57,11 +56,11 @@ namespace MediaBrowser.Model.Configuration
 
         public bool EnableLocalPassword { get; set; }
 
-        public string[] OrderedViews { get; set; }
+        public Guid[] OrderedViews { get; set; }
 
-        public string[] LatestItemsExcludes { get; set; }
+        public Guid[] LatestItemsExcludes { get; set; }
 
-        public string[] MyMediaExcludes { get; set; }
+        public Guid[] MyMediaExcludes { get; set; }
 
         public bool HidePlayedInLatest { get; set; }
 
@@ -70,5 +69,10 @@ namespace MediaBrowser.Model.Configuration
         public bool RememberSubtitleSelections { get; set; }
 
         public bool EnableNextEpisodeAutoPlay { get; set; }
+
+        /// <summary>
+        /// Gets or sets the id of the selected cast receiver.
+        /// </summary>
+        public string? CastReceiverId { get; set; }
     }
 }

@@ -1,9 +1,9 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Globalization;
@@ -47,7 +47,7 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.System
             var time = result.EndTimeUtc - result.StartTimeUtc;
             var runningTime = string.Format(
                 CultureInfo.InvariantCulture,
-                _localizationManager.GetLocalizedString("LabelRunningTimeValue"),
+                _localizationManager.GetServerLocalizedString("LabelRunningTimeValue"),
                 ToUserFriendlyString(time));
 
             if (result.Status == TaskCompletionStatus.Failed)
@@ -65,7 +65,7 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.System
                 }
 
                 await _activityManager.CreateAsync(new ActivityLog(
-                    string.Format(CultureInfo.InvariantCulture, _localizationManager.GetLocalizedString("ScheduledTaskFailedWithName"), task.Name),
+                    string.Format(CultureInfo.InvariantCulture, _localizationManager.GetServerLocalizedString("ScheduledTaskFailedWithName"), task.Name),
                     NotificationType.TaskFailed.ToString(),
                     Guid.Empty)
                 {

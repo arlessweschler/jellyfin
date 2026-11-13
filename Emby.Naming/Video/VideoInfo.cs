@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using MediaBrowser.Model.Entities;
 
 namespace Emby.Naming.Video
 {
@@ -16,9 +17,8 @@ namespace Emby.Naming.Video
         {
             Name = name;
 
-            Files = Array.Empty<VideoFileInfo>();
-            Extras = Array.Empty<VideoFileInfo>();
-            AlternateVersions = Array.Empty<VideoFileInfo>();
+            Files = [];
+            AlternateVersions = [];
         }
 
         /// <summary>
@@ -40,15 +40,14 @@ namespace Emby.Naming.Video
         public IReadOnlyList<VideoFileInfo> Files { get; set; }
 
         /// <summary>
-        /// Gets or sets the extras.
-        /// </summary>
-        /// <value>The extras.</value>
-        public IReadOnlyList<VideoFileInfo> Extras { get; set; }
-
-        /// <summary>
-        /// Gets or sets the alternate versions.
+        /// Gets or sets the alternate versions. Each alternate may itself span multiple files.
         /// </summary>
         /// <value>The alternate versions.</value>
-        public IReadOnlyList<VideoFileInfo> AlternateVersions { get; set; }
+        public IReadOnlyList<VideoInfo> AlternateVersions { get; set; }
+
+        /// <summary>
+        /// Gets or sets the extra type.
+        /// </summary>
+        public ExtraType? ExtraType { get; set; }
     }
 }

@@ -1,9 +1,10 @@
 #nullable disable
 
-#pragma warning disable CS1591
+#pragma warning disable CA1819, CS1591
 
 using System;
 using System.Linq;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Providers;
 
@@ -25,12 +26,15 @@ namespace MediaBrowser.Controller.Providers
             ReplaceAllMetadata = copy.ReplaceAllMetadata;
             EnableRemoteContentProbe = copy.EnableRemoteContentProbe;
 
+            IsAutomated = copy.IsAutomated;
             ImageRefreshMode = copy.ImageRefreshMode;
             ReplaceAllImages = copy.ReplaceAllImages;
+            RegenerateTrickplay = copy.RegenerateTrickplay;
             ReplaceImages = copy.ReplaceImages;
             SearchResult = copy.SearchResult;
+            RemoveOldMetadata = copy.RemoveOldMetadata;
 
-            if (copy.RefreshPaths != null && copy.RefreshPaths.Length > 0)
+            if (copy.RefreshPaths is not null && copy.RefreshPaths.Length > 0)
             {
                 RefreshPaths ??= Array.Empty<string>();
 
@@ -44,6 +48,12 @@ namespace MediaBrowser.Controller.Providers
         /// </summary>
         public bool ReplaceAllMetadata { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether all existing trickplay images should be overwritten
+        /// when paired with MetadataRefreshMode=FullRefresh.
+        /// </summary>
+        public bool RegenerateTrickplay { get; set; }
+
         public MetadataRefreshMode MetadataRefreshMode { get; set; }
 
         public RemoteSearchResult SearchResult { get; set; }
@@ -56,9 +66,9 @@ namespace MediaBrowser.Controller.Providers
 
         public bool RefreshItem(BaseItem item)
         {
-            if (RefreshPaths != null && RefreshPaths.Length > 0)
+            if (RefreshPaths is not null && RefreshPaths.Length > 0)
             {
-                return RefreshPaths.Contains(item.Path ?? string.Empty, StringComparer.OrdinalIgnoreCase);
+                return RefreshPaths.Contains(item.Path ?? string.Empty, StringComparison.OrdinalIgnoreCase);
             }
 
             return true;

@@ -1,17 +1,174 @@
-#pragma warning disable CS1591
+#pragma warning disable CA1044, CA1819, CA2227, CS1591
 
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using Jellyfin.Data.Entities;
+using Diacritics.Extensions;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Model.Entities;
+using MediaBrowser.Model.Querying;
 
 namespace MediaBrowser.Controller.Entities
 {
     public class InternalItemsQuery
     {
+        public InternalItemsQuery()
+        {
+            AlbumArtistIds = [];
+            AlbumIds = [];
+            AncestorIds = [];
+            LinkedChildAncestorIds = [];
+            ArtistIds = [];
+            BlockUnratedItems = [];
+            BoxSetLibraryFolders = [];
+            ChannelIds = [];
+            ContributingArtistIds = [];
+            DtoOptions = new DtoOptions();
+            EnableTotalRecordCount = true;
+            ExcludeArtistIds = [];
+            ExcludeInheritedTags = [];
+            IncludeInheritedTags = [];
+            ExcludeItemIds = [];
+            ExcludeItemTypes = [];
+            ExcludeTags = [];
+            GenreIds = [];
+            Genres = [];
+            GroupByPresentationUniqueKey = true;
+            ImageTypes = [];
+            IncludeItemTypes = [];
+            ItemIds = [];
+            OwnerIds = [];
+            ExtraTypes = [];
+            MediaTypes = [];
+            OfficialRatings = [];
+            OrderBy = [];
+            OwnerIds = [];
+            PersonIds = [];
+            PersonTypes = [];
+            PresetViews = [];
+            SeriesStatuses = [];
+            SourceTypes = [];
+            StudioIds = [];
+            Tags = [];
+            TopParentIds = [];
+            TrailerTypes = [];
+            VideoTypes = [];
+            Years = [];
+            SkipDeserialization = false;
+            AudioLanguages = [];
+            SubtitleLanguages = [];
+        }
+
+        public InternalItemsQuery(User? user)
+            : this()
+        {
+            if (user is not null)
+            {
+                SetUser(user);
+            }
+        }
+
+        /// <summary>
+        /// Gets a value indicating whether the query carries any criteria that narrows the
+        /// result set, as opposed to user context, pagination, sorting or DTO options.
+        /// </summary>
+        public bool HasFilters =>
+            IncludeItemTypes.Length > 0
+            || ExcludeItemTypes.Length > 0
+            || Genres.Count > 0
+            || GenreIds.Count > 0
+            || Years.Length > 0
+            || Tags.Length > 0
+            || ExcludeTags.Length > 0
+            || OfficialRatings.Length > 0
+            || StudioIds.Length > 0
+            || ArtistIds.Length > 0
+            || AlbumArtistIds.Length > 0
+            || ContributingArtistIds.Length > 0
+            || ExcludeArtistIds.Length > 0
+            || AlbumIds.Length > 0
+            || PersonIds.Length > 0
+            || PersonTypes.Length > 0
+            || MediaTypes.Length > 0
+            || VideoTypes.Length > 0
+            || ImageTypes.Length > 0
+            || SeriesStatuses.Length > 0
+            || ItemIds.Length > 0
+            || ExcludeItemIds.Length > 0
+            || AudioLanguages.Count > 0
+            || SubtitleLanguages.Count > 0
+            || LinkedChildAncestorIds.Length > 0
+            || AncestorIds.Length > 0
+            || DescendantOfId.HasValue
+            || IsFavorite.HasValue
+            || IsFavoriteOrLiked.HasValue
+            || IsLiked.HasValue
+            || IsPlayed.HasValue
+            || IsResumable.HasValue
+            || IsFolder.HasValue
+            || IsMissing.HasValue
+            || IsUnaired.HasValue
+            || IsSpecialSeason.HasValue
+            || Is3D.HasValue
+            || IsHD.HasValue
+            || Is4K.HasValue
+            || IsLocked.HasValue
+            || IsPlaceHolder.HasValue
+            || IsMovie.HasValue
+            || IsSports.HasValue
+            || IsKids.HasValue
+            || IsNews.HasValue
+            || IsSeries.HasValue
+            || IsAiring.HasValue
+            || IsVirtualItem.HasValue
+            || HasImdbId.HasValue
+            || HasTmdbId.HasValue
+            || HasTvdbId.HasValue
+            || HasOverview.HasValue
+            || HasOfficialRating.HasValue
+            || HasParentalRating.HasValue
+            || HasThemeSong.HasValue
+            || HasThemeVideo.HasValue
+            || HasSubtitles.HasValue
+            || HasSpecialFeature.HasValue
+            || HasTrailer.HasValue
+            || HasChapterImages.HasValue
+            || MinCriticRating.HasValue
+            || MinCommunityRating.HasValue
+            || MinParentalRating is not null
+            || MinIndexNumber.HasValue
+            || MinParentAndIndexNumber.HasValue
+            || IndexNumber.HasValue
+            || ParentIndexNumber.HasValue
+            || AiredDuringSeason.HasValue
+            || MinWidth.HasValue
+            || MinHeight.HasValue
+            || MaxWidth.HasValue
+            || MaxHeight.HasValue
+            || MinPremiereDate.HasValue
+            || MaxPremiereDate.HasValue
+            || MinStartDate.HasValue
+            || MaxStartDate.HasValue
+            || MinEndDate.HasValue
+            || MaxEndDate.HasValue
+            || MinDateCreated.HasValue
+            || MinDateLastSaved.HasValue
+            || MinDateLastSavedForUser.HasValue
+            || AdjacentTo.HasValue
+            || !string.IsNullOrEmpty(NameStartsWith)
+            || !string.IsNullOrEmpty(NameStartsWithOrGreater)
+            || !string.IsNullOrEmpty(NameLessThan)
+            || !string.IsNullOrEmpty(NameContains)
+            || !string.IsNullOrEmpty(MinSortName)
+            || !string.IsNullOrEmpty(Name)
+            || !string.IsNullOrEmpty(Person)
+            || !string.IsNullOrEmpty(SearchTerm)
+            || !string.IsNullOrEmpty(Path);
+
         public bool Recursive { get; set; }
 
         public int? StartIndex { get; set; }
@@ -19,8 +176,6 @@ namespace MediaBrowser.Controller.Entities
         public int? Limit { get; set; }
 
         public User? User { get; set; }
-
-        public BaseItem? SimilarTo { get; set; }
 
         public bool? IsFolder { get; set; }
 
@@ -36,15 +191,17 @@ namespace MediaBrowser.Controller.Entities
 
         public bool? IncludeItemsByName { get; set; }
 
-        public string[] MediaTypes { get; set; }
+        public MediaType[] MediaTypes { get; set; }
 
-        public string[] IncludeItemTypes { get; set; }
+        public BaseItemKind[] IncludeItemTypes { get; set; }
 
-        public string[] ExcludeItemTypes { get; set; }
+        public BaseItemKind[] ExcludeItemTypes { get; set; }
 
         public string[] ExcludeTags { get; set; }
 
         public string[] ExcludeInheritedTags { get; set; }
+
+        public string[] IncludeInheritedTags { get; set; }
 
         public IReadOnlyList<string> Genres { get; set; }
 
@@ -55,6 +212,12 @@ namespace MediaBrowser.Controller.Entities
         public bool? IsUnaired { get; set; }
 
         public bool? CollapseBoxSetItems { get; set; }
+
+        /// <summary>
+        /// Gets or sets the item types that should be collapsed into box sets.
+        /// When empty, all types are collapsed. When set, only items of these types are replaced by their parent box set.
+        /// </summary>
+        public BaseItemKind[] CollapseBoxSetItemTypes { get; set; } = [];
 
         public string? NameStartsWithOrGreater { get; set; }
 
@@ -78,9 +241,13 @@ namespace MediaBrowser.Controller.Entities
 
         public Guid[] ItemIds { get; set; }
 
+        public Guid[] OwnerIds { get; set; }
+
+        public ExtraType[] ExtraTypes { get; set; }
+
         public Guid[] ExcludeItemIds { get; set; }
 
-        public string? AdjacentTo { get; set; }
+        public Guid? AdjacentTo { get; set; }
 
         public string[] PersonTypes { get; set; }
 
@@ -156,6 +323,16 @@ namespace MediaBrowser.Controller.Entities
 
         public int? MinIndexNumber { get; set; }
 
+        /// <summary>
+        /// Gets or sets the minimum ParentIndexNumber and IndexNumber.
+        /// </summary>
+        /// <remarks>
+        /// It produces this where clause:
+        /// <para>(ParentIndexNumber = X and IndexNumber >= Y) or ParentIndexNumber > X.
+        /// </para>
+        /// </remarks>
+        public (int ParentIndexNumber, int IndexNumber)? MinParentAndIndexNumber { get; set; }
+
         public int? AiredDuringSeason { get; set; }
 
         public double? MinCriticRating { get; set; }
@@ -170,9 +347,9 @@ namespace MediaBrowser.Controller.Entities
 
         public int? IndexNumber { get; set; }
 
-        public int? MinParentalRating { get; set; }
+        public ParentalRatingScore? MinParentalRating { get; set; }
 
-        public int? MaxParentalRating { get; set; }
+        public ParentalRatingScore? MaxParentalRating { get; set; }
 
         public bool? HasDeadParentId { get; set; }
 
@@ -180,30 +357,26 @@ namespace MediaBrowser.Controller.Entities
 
         public Guid ParentId { get; set; }
 
-        public string? ParentType { get; set; }
+        public BaseItemKind? ParentType { get; set; }
 
         public Guid[] AncestorIds { get; set; }
 
+        /// <summary>
+        /// Gets or sets a list of ancestor ids that the item's linked children must descend from.
+        /// Useful for filtering BoxSets/Playlists to only those that contain items from a specific library.
+        /// </summary>
+        public Guid[] LinkedChildAncestorIds { get; set; }
+
+        /// <summary>
+        /// Gets or sets the id of a folder whose descendants the items must be part of.
+        /// Unlike <see cref="AncestorIds"/> this also follows the linked children of BoxSets and
+        /// Playlists, so it reaches the items below a linked folder (a Series' episodes, for example).
+        /// </summary>
+        public Guid? DescendantOfId { get; set; }
+
         public Guid[] TopParentIds { get; set; }
 
-        public BaseItem? Parent
-        {
-            set
-            {
-                if (value == null)
-                {
-                    ParentId = Guid.Empty;
-                    ParentType = null;
-                }
-                else
-                {
-                    ParentId = value.Id;
-                    ParentType = value.GetType().Name;
-                }
-            }
-        }
-
-        public string[] PresetViews { get; set; }
+        public CollectionType?[] PresetViews { get; set; }
 
         public TrailerType[] TrailerTypes { get; set; }
 
@@ -239,7 +412,7 @@ namespace MediaBrowser.Controller.Entities
 
         public bool? HasChapterImages { get; set; }
 
-        public IReadOnlyList<(string, SortOrder)> OrderBy { get; set; }
+        public IReadOnlyList<(ItemSortBy OrderBy, SortOrder SortOrder)> OrderBy { get; set; }
 
         public DateTime? MinDateCreated { get; set; }
 
@@ -249,8 +422,6 @@ namespace MediaBrowser.Controller.Entities
 
         public DtoOptions DtoOptions { get; set; }
 
-        public int MinSimilarityScore { get; set; }
-
         public string? HasNoAudioTrackWithLanguage { get; set; }
 
         public string? HasNoInternalSubtitleTrackWithLanguage { get; set; }
@@ -259,10 +430,18 @@ namespace MediaBrowser.Controller.Entities
 
         public string? HasNoSubtitleTrackWithLanguage { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether to return only items nothing names any more.
+        /// </summary>
         public bool? IsDeadArtist { get; set; }
 
         public bool? IsDeadStudio { get; set; }
 
+        public bool? IsDeadGenre { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to return only items nothing names any more.
+        /// </summary>
         public bool? IsDeadPerson { get; set; }
 
         /// <summary>
@@ -270,73 +449,26 @@ namespace MediaBrowser.Controller.Entities
         /// </summary>
         public bool? DisplayAlbumFolders { get; set; }
 
-        public InternalItemsQuery()
+        public BaseItem? Parent
         {
-            AlbumArtistIds = Array.Empty<Guid>();
-            AlbumIds = Array.Empty<Guid>();
-            AncestorIds = Array.Empty<Guid>();
-            ArtistIds = Array.Empty<Guid>();
-            BlockUnratedItems = Array.Empty<UnratedItem>();
-            BoxSetLibraryFolders = Array.Empty<Guid>();
-            ChannelIds = Array.Empty<Guid>();
-            ContributingArtistIds = Array.Empty<Guid>();
-            DtoOptions = new DtoOptions();
-            EnableTotalRecordCount = true;
-            ExcludeArtistIds = Array.Empty<Guid>();
-            ExcludeInheritedTags = Array.Empty<string>();
-            ExcludeItemIds = Array.Empty<Guid>();
-            ExcludeItemTypes = Array.Empty<string>();
-            ExcludeTags = Array.Empty<string>();
-            GenreIds = Array.Empty<Guid>();
-            Genres = Array.Empty<string>();
-            GroupByPresentationUniqueKey = true;
-            ImageTypes = Array.Empty<ImageType>();
-            IncludeItemTypes = Array.Empty<string>();
-            ItemIds = Array.Empty<Guid>();
-            MediaTypes = Array.Empty<string>();
-            MinSimilarityScore = 20;
-            OfficialRatings = Array.Empty<string>();
-            OrderBy = Array.Empty<ValueTuple<string, SortOrder>>();
-            PersonIds = Array.Empty<Guid>();
-            PersonTypes = Array.Empty<string>();
-            PresetViews = Array.Empty<string>();
-            SeriesStatuses = Array.Empty<SeriesStatus>();
-            SourceTypes = Array.Empty<SourceType>();
-            StudioIds = Array.Empty<Guid>();
-            Tags = Array.Empty<string>();
-            TopParentIds = Array.Empty<Guid>();
-            TrailerTypes = Array.Empty<TrailerType>();
-            VideoTypes = Array.Empty<VideoType>();
-            Years = Array.Empty<int>();
-        }
-
-        public InternalItemsQuery(User? user)
-            : this()
-        {
-            if (user != null)
+            set
             {
-                SetUser(user);
+                if (value is null)
+                {
+                    ParentId = Guid.Empty;
+                    ParentType = null;
+                }
+                else
+                {
+                    ParentId = value.Id;
+                    ParentType = value.GetBaseItemKind();
+                }
             }
-        }
-
-        public void SetUser(User user)
-        {
-            MaxParentalRating = user.MaxParentalAgeRating;
-
-            if (MaxParentalRating.HasValue)
-            {
-                string other = UnratedItem.Other.ToString();
-                BlockUnratedItems = user.GetPreference(PreferenceKind.BlockUnratedItems)
-                    .Where(i => i != other)
-                    .Select(e => Enum.Parse<UnratedItem>(e, true)).ToArray();
-            }
-
-            ExcludeInheritedTags = user.GetPreference(PreferenceKind.BlockedTags);
-
-            User = user;
         }
 
         public Dictionary<string, string>? HasAnyProviderId { get; set; }
+
+        public Dictionary<string, string[]>? HasAnyProviderIds { get; set; }
 
         public Guid[] AlbumArtistIds { get; set; }
 
@@ -347,6 +479,20 @@ namespace MediaBrowser.Controller.Entities
         public bool? HasAired { get; set; }
 
         public bool? HasOwnerId { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to include items with an OwnerId
+        /// (additional parts, alternate versions) that are normally excluded from general queries.
+        /// </summary>
+        public bool IncludeOwnedItems { get; set; }
+
+        /// <summary>
+        /// Gets or sets a value indicating whether to include alternate versions, which carry a
+        /// <see cref="Video.PrimaryVersionId"/> and are normally hidden behind the version they
+        /// belong to. Unlike <see cref="IncludeOwnedItems"/> this keeps the versions a user merged
+        /// by hand without also returning the parts and extras owned by another item.
+        /// </summary>
+        public bool IncludeAlternateVersions { get; set; }
 
         public bool? Is4K { get; set; }
 
@@ -361,5 +507,116 @@ namespace MediaBrowser.Controller.Entities
         public string? SearchTerm { get; set; }
 
         public string? SeriesTimerId { get; set; }
+
+        public bool SkipDeserialization { get; set; }
+
+        public bool IncludeExtras { get; set; }
+
+        public IReadOnlyList<string> AudioLanguages { get; set; }
+
+        public IReadOnlyList<string> SubtitleLanguages { get; set; }
+
+        /// <summary>
+        /// Gets a value indicating whether some content in the library is hidden from <see cref="User"/>.
+        /// Filters that only exist to hide content can be skipped entirely when this is false.
+        /// </summary>
+        public bool UserHasContentRestrictions { get; private set; }
+
+        public void SetUser(User user)
+        {
+            var maxRating = user.MaxParentalRatingScore;
+            if (maxRating.HasValue)
+            {
+                MaxParentalRating = new(maxRating.Value, user.MaxParentalRatingSubScore);
+            }
+
+            var other = UnratedItem.Other.ToString();
+            BlockUnratedItems = user.GetPreference(PreferenceKind.BlockUnratedItems)
+                .Where(i => i != other)
+                .Select(e => Enum.Parse<UnratedItem>(e, true)).ToArray();
+
+            ExcludeInheritedTags = user.GetPreference(PreferenceKind.BlockedTags)
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Select(tag => tag.RemoveDiacritics().ToLowerInvariant())
+                .ToArray();
+
+            IncludeInheritedTags = user.GetPreference(PreferenceKind.AllowedTags)
+                .Where(tag => !string.IsNullOrWhiteSpace(tag))
+                .Select(tag => tag.RemoveDiacritics().ToLowerInvariant())
+                .ToArray();
+
+            UserHasContentRestrictions = user.HasContentRestrictions();
+            User = user;
+        }
+
+        public void ApplyFilters(ItemFilter[] filters)
+        {
+            static void ThrowConflictingFilters()
+                => throw new ArgumentException("Conflicting filters", nameof(filters));
+
+            foreach (var filter in filters)
+            {
+                switch (filter)
+                {
+                    case ItemFilter.IsFolder:
+                        if (filters.Contains(ItemFilter.IsNotFolder))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsFolder = true;
+                        break;
+                    case ItemFilter.IsNotFolder:
+                        if (filters.Contains(ItemFilter.IsFolder))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsFolder = false;
+                        break;
+                    case ItemFilter.IsUnplayed:
+                        if (filters.Contains(ItemFilter.IsPlayed))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsPlayed = false;
+                        break;
+                    case ItemFilter.IsPlayed:
+                        if (filters.Contains(ItemFilter.IsUnplayed))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsPlayed = true;
+                        break;
+                    case ItemFilter.IsFavorite:
+                        IsFavorite = true;
+                        break;
+                    case ItemFilter.IsResumable:
+                        IsResumable = true;
+                        break;
+                    case ItemFilter.Likes:
+                        if (filters.Contains(ItemFilter.Dislikes))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsLiked = true;
+                        break;
+                    case ItemFilter.Dislikes:
+                        if (filters.Contains(ItemFilter.Likes))
+                        {
+                            ThrowConflictingFilters();
+                        }
+
+                        IsLiked = false;
+                        break;
+                    case ItemFilter.IsFavoriteOrLikes:
+                        IsFavoriteOrLiked = true;
+                        break;
+                }
+            }
+        }
     }
 }

@@ -1,8 +1,4 @@
-#pragma warning disable CS1591
-
-using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Net.Http;
 using System.Threading;
@@ -11,41 +7,57 @@ using MediaBrowser.Common.Net;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.Extensions;
 using MediaBrowser.Model.Providers;
 
 namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 {
+    /// <summary>
+    /// TV season image provider powered by TheMovieDb.
+    /// </summary>
     public class TmdbSeasonImageProvider : IRemoteImageProvider, IHasOrder
     {
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly TmdbClientManager _tmdbClientManager;
 
+        /// <summary>
+        /// Initializes a new instance of the <see cref="TmdbSeasonImageProvider"/> class.
+        /// </summary>
+        /// <param name="httpClientFactory">The <see cref="IHttpClientFactory"/>.</param>
+        /// <param name="tmdbClientManager">The <see cref="TmdbClientManager"/>.</param>
         public TmdbSeasonImageProvider(IHttpClientFactory httpClientFactory, TmdbClientManager tmdbClientManager)
         {
             _httpClientFactory = httpClientFactory;
             _tmdbClientManager = tmdbClientManager;
         }
 
+        /// <inheritdoc/>
         public int Order => 1;
 
+        /// <inheritdoc/>
         public string Name => TmdbUtils.ProviderName;
 
-        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
+        /// <inheritdoc />
+        public bool Supports(BaseItem item)
         {
-            return _httpClientFactory.CreateClient(NamedClient.Default).GetAsync(url, cancellationToken);
+            return item is Season;
         }
 
+        /// <inheritdoc />
+        public IEnumerable<ImageType> GetSupportedImages(BaseItem item)
+        {
+            yield return ImageType.Primary;
+        }
+
+        /// <inheritdoc />
         public async Task<IEnumerable<RemoteImageInfo>> GetImages(BaseItem item, CancellationToken cancellationToken)
         {
             var season = (Season)item;
             var series = season?.Series;
 
-            var seriesTmdbId = Convert.ToInt32(series?.GetProviderId(MetadataProvider.Tmdb), CultureInfo.InvariantCulture);
+            var seriesTmdbId = 0;
 
-            if (seriesTmdbId <= 0 || season?.IndexNumber == null)
+            if (season?.IndexNumber is null || series?.TryGetTmdbId(out seriesTmdbId) != true)
             {
                 return Enumerable.Empty<RemoteImageInfo>();
             }
@@ -54,47 +66,22 @@ namespace MediaBrowser.Providers.Plugins.Tmdb.TV
 
             // TODO use image languages if All Languages isn't toggled, but there's currently no way to get that value in here
             var seasonResult = await _tmdbClientManager
-                .GetSeasonAsync(seriesTmdbId, season.IndexNumber.Value, null, null, cancellationToken)
+                .GetSeasonAsync(seriesTmdbId, season.IndexNumber.Value, null, null, null, cancellationToken)
                 .ConfigureAwait(false);
 
             var posters = seasonResult?.Images?.Posters;
-            if (posters == null)
+            if (posters is null)
             {
                 return Enumerable.Empty<RemoteImageInfo>();
             }
 
-            var remoteImages = new RemoteImageInfo[posters.Count];
-            for (var i = 0; i < posters.Count; i++)
-            {
-                var image = posters[i];
-                remoteImages[i] = new RemoteImageInfo
-                {
-                    Url = _tmdbClientManager.GetPosterUrl(image.FilePath),
-                    CommunityRating = image.VoteAverage,
-                    VoteCount = image.VoteCount,
-                    Width = image.Width,
-                    Height = image.Height,
-                    Language = TmdbUtils.AdjustImageLanguage(image.Iso_639_1, language),
-                    ProviderName = Name,
-                    Type = ImageType.Primary,
-                    RatingType = RatingType.Score
-                };
-            }
-
-            return remoteImages.OrderByLanguageDescending(language);
+            return _tmdbClientManager.ConvertPostersToRemoteImageInfo(posters, language);
         }
 
-        public IEnumerable<ImageType> GetSupportedImages(BaseItem item)
+        /// <inheritdoc />
+        public Task<HttpResponseMessage> GetImageResponse(string url, CancellationToken cancellationToken)
         {
-            return new List<ImageType>
-            {
-                ImageType.Primary
-            };
-        }
-
-        public bool Supports(BaseItem item)
-        {
-            return item is Season;
+            return _httpClientFactory.CreateClient(NamedClient.Default).GetAsync(url, cancellationToken);
         }
     }
 }

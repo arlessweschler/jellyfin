@@ -1,0 +1,22 @@
+using Jellyfin.Database.Implementations.Entities;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+
+namespace Jellyfin.Database.Implementations.ModelConfiguration
+{
+    /// <summary>
+    /// FluentAPI configuration for the Permission entity.
+    /// </summary>
+    public class PermissionConfiguration : IEntityTypeConfiguration<Permission>
+    {
+        /// <inheritdoc/>
+        public void Configure(EntityTypeBuilder<Permission> builder)
+        {
+            // Used to get a user's permissions or a specific permission for a user.
+            // Also prevents multiple values being created for a user.
+            builder
+                .HasIndex(p => new { p.UserId, p.Kind })
+                .IsUnique();
+        }
+    }
+}

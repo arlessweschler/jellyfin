@@ -23,24 +23,11 @@ namespace Emby.Server.Implementations.Data
         /// <exception cref="ArgumentNullException"><c>typeName</c> is null.</exception>
         public Type? GetType(string typeName)
         {
-            if (string.IsNullOrEmpty(typeName))
-            {
-                throw new ArgumentNullException(nameof(typeName));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(typeName);
 
-            return _typeMap.GetOrAdd(typeName, LookupType);
-        }
-
-        /// <summary>
-        /// Lookups the type.
-        /// </summary>
-        /// <param name="typeName">Name of the type.</param>
-        /// <returns>Type.</returns>
-        private Type? LookupType(string typeName)
-        {
-            return AppDomain.CurrentDomain.GetAssemblies()
-                .Select(a => a.GetType(typeName))
-                .FirstOrDefault(t => t != null);
+            return _typeMap.GetOrAdd(typeName, k => AppDomain.CurrentDomain.GetAssemblies()
+                .Select(a => a.GetType(k))
+                .FirstOrDefault(t => t is not null));
         }
     }
 }

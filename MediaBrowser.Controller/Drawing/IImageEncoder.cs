@@ -1,7 +1,4 @@
-#nullable disable
-
 #pragma warning disable CS1591
-#nullable enable
 
 using System;
 using System.Collections.Generic;
@@ -60,6 +57,15 @@ namespace MediaBrowser.Controller.Drawing
         /// <summary>
         /// Encode an image.
         /// </summary>
+        /// <param name="inputPath">Input path of image.</param>
+        /// <param name="dateModified">Date modified.</param>
+        /// <param name="outputPath">Output path of image.</param>
+        /// <param name="autoOrient">Auto-orient image.</param>
+        /// <param name="orientation">Desired orientation of image.</param>
+        /// <param name="quality">Quality of encoded image.</param>
+        /// <param name="options">Image processing options.</param>
+        /// <param name="outputFormat">Image format of output.</param>
+        /// <returns>Path of encoded image.</returns>
         string EncodeImage(string inputPath, DateTime dateModified, string outputPath, bool autoOrient, ImageOrientation? orientation, int quality, ImageProcessingOptions options, ImageFormat outputFormat);
 
         /// <summary>
@@ -68,5 +74,22 @@ namespace MediaBrowser.Controller.Drawing
         /// <param name="options">The options to use when creating the collage.</param>
         /// <param name="libraryName">Optional. </param>
         void CreateImageCollage(ImageCollageOptions options, string? libraryName);
+
+        /// <summary>
+        /// Creates a new splashscreen image.
+        /// </summary>
+        /// <param name="posters">The list of poster paths.</param>
+        /// <param name="backdrops">The list of backdrop paths.</param>
+        void CreateSplashscreen(IReadOnlyList<string> posters, IReadOnlyList<string> backdrops);
+
+        /// <summary>
+        /// Creates a new trickplay tile image.
+        /// </summary>
+        /// <param name="options">The options to use when creating the image. Width and Height are a quantity of thumbnails in this case, not pixels.</param>
+        /// <param name="quality">The image encode quality.</param>
+        /// <param name="imgWidth">The width of a single trickplay thumbnail.</param>
+        /// <param name="imgHeight">Optional height of a single trickplay thumbnail, if it is known.</param>
+        /// <returns>Height of single decoded trickplay thumbnail.</returns>
+        int CreateTrickplayTile(ImageCollageOptions options, int quality, int imgWidth, int? imgHeight);
     }
 }

@@ -1,6 +1,6 @@
 #nullable disable
 
-#pragma warning disable CS1591
+#pragma warning disable CS1591, SA1306, SA1401
 
 using System;
 using System.Collections.Generic;
@@ -8,9 +8,11 @@ using System.Globalization;
 using System.Linq;
 using System.Net.WebSockets;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
-using MediaBrowser.Model.Net;
+using MediaBrowser.Controller.Net.WebSocketMessages;
 using MediaBrowser.Model.Session;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Net
@@ -20,15 +22,39 @@ namespace MediaBrowser.Controller.Net
     /// </summary>
     /// <typeparam name="TReturnDataType">The type of the T return data type.</typeparam>
     /// <typeparam name="TStateType">The type of the T state type.</typeparam>
-    public abstract class BasePeriodicWebSocketListener<TReturnDataType, TStateType> : IWebSocketListener, IDisposable
+    public abstract class BasePeriodicWebSocketListener<TReturnDataType, TStateType> : IWebSocketListener, IAsyncDisposable
         where TStateType : WebSocketListenerState, new()
         where TReturnDataType : class
     {
+        private readonly Channel<bool> _channel = Channel.CreateUnbounded<bool>(new UnboundedChannelOptions
+        {
+            AllowSynchronousContinuations = false,
+            SingleReader = true,
+            SingleWriter = false
+        });
+
+        private readonly Lock _activeConnectionsLock = new();
+
         /// <summary>
         /// The _active connections.
         /// </summary>
-        private readonly List<Tuple<IWebSocketConnection, CancellationTokenSource, TStateType>> _activeConnections =
-            new List<Tuple<IWebSocketConnection, CancellationTokenSource, TStateType>>();
+        private readonly List<(IWebSocketConnection Connection, CancellationTokenSource CancellationTokenSource, TStateType State)> _activeConnections = new();
+
+        private readonly Task _messageConsumerTask;
+
+        protected BasePeriodicWebSocketListener(ILogger<BasePeriodicWebSocketListener<TReturnDataType, TStateType>> logger)
+        {
+            ArgumentNullException.ThrowIfNull(logger);
+
+            Logger = logger;
+
+            _messageConsumerTask = HandleMessages();
+        }
+
+        /// <summary>
+        /// Gets the Logger.
+        /// </summary>
+        protected ILogger<BasePeriodicWebSocketListener<TReturnDataType, TStateType>> Logger { get; }
 
         /// <summary>
         /// Gets the type used for the messages sent to the client.
@@ -55,18 +81,13 @@ namespace MediaBrowser.Controller.Net
         protected abstract Task<TReturnDataType> GetDataToSend();
 
         /// <summary>
-        /// The logger.
+        /// Gets the data to send for a specific connection.
         /// </summary>
-        protected ILogger<BasePeriodicWebSocketListener<TReturnDataType, TStateType>> Logger;
-
-        protected BasePeriodicWebSocketListener(ILogger<BasePeriodicWebSocketListener<TReturnDataType, TStateType>> logger)
+        /// <param name="connection">The connection.</param>
+        /// <returns>Task{`1}.</returns>
+        protected virtual Task<TReturnDataType> GetDataToSendForConnection(IWebSocketConnection connection)
         {
-            if (logger == null)
-            {
-                throw new ArgumentNullException(nameof(logger));
-            }
-
-            Logger = logger;
+            return GetDataToSend();
         }
 
         /// <summary>
@@ -76,10 +97,7 @@ namespace MediaBrowser.Controller.Net
         /// <returns>Task.</returns>
         public Task ProcessMessageAsync(WebSocketMessageInfo message)
         {
-            if (message == null)
-            {
-                throw new ArgumentNullException(nameof(message));
-            }
+            ArgumentNullException.ThrowIfNull(message);
 
             if (message.MessageType == StartType)
             {
@@ -95,13 +113,13 @@ namespace MediaBrowser.Controller.Net
         }
 
         /// <inheritdoc />
-        public Task ProcessWebSocketConnectedAsync(IWebSocketConnection connection) => Task.CompletedTask;
+        public Task ProcessWebSocketConnectedAsync(IWebSocketConnection connection, HttpContext httpContext) => Task.CompletedTask;
 
         /// <summary>
         /// Starts sending messages over a web socket.
         /// </summary>
         /// <param name="message">The message.</param>
-        private void Start(WebSocketMessageInfo message)
+        protected virtual void Start(WebSocketMessageInfo message)
         {
             var vals = message.Data.Split(',');
 
@@ -118,76 +136,99 @@ namespace MediaBrowser.Controller.Net
                 InitialDelayMs = dueTimeMs
             };
 
-            lock (_activeConnections)
+            lock (_activeConnectionsLock)
             {
-                _activeConnections.Add(new Tuple<IWebSocketConnection, CancellationTokenSource, TStateType>(message.Connection, cancellationTokenSource, state));
+                _activeConnections.Add((message.Connection, cancellationTokenSource, state));
             }
         }
 
-        protected async Task SendData(bool force)
+        protected void SendData(bool force)
         {
-            Tuple<IWebSocketConnection, CancellationTokenSource, TStateType>[] tuples;
+            _channel.Writer.TryWrite(force);
+        }
 
-            lock (_activeConnections)
+        private async Task HandleMessages()
+        {
+            while (await _channel.Reader.WaitToReadAsync().ConfigureAwait(false))
             {
-                tuples = _activeConnections
-                    .Where(c =>
+                while (_channel.Reader.TryRead(out var force))
+                {
+                    try
                     {
-                        if (c.Item1.State == WebSocketState.Open && !c.Item2.IsCancellationRequested)
-                        {
-                            var state = c.Item3;
+                        (IWebSocketConnection Connection, CancellationTokenSource CancellationTokenSource, TStateType State)[] tuples;
 
-                            if (force || (DateTime.UtcNow - state.DateLastSendUtc).TotalMilliseconds >= state.IntervalMs)
+                        var now = DateTime.UtcNow;
+                        lock (_activeConnectionsLock)
+                        {
+                            if (_activeConnections.Count == 0)
                             {
-                                return true;
+                                continue;
+                            }
+
+                            tuples = _activeConnections
+                                .Where(c =>
+                                {
+                                    if (c.Connection.State != WebSocketState.Open || c.CancellationTokenSource.IsCancellationRequested)
+                                    {
+                                        return false;
+                                    }
+
+                                    var state = c.State;
+                                    return force || (now - state.DateLastSendUtc).TotalMilliseconds >= state.IntervalMs;
+                                })
+                                .ToArray();
+                        }
+
+                        if (tuples.Length == 0)
+                        {
+                            continue;
+                        }
+
+                        IEnumerable<Task> GetTasks()
+                        {
+                            foreach (var tuple in tuples)
+                            {
+                                yield return SendDataForConnectionAsync(tuple);
                             }
                         }
 
-                        return false;
-                    })
-                    .ToArray();
-            }
-
-            IEnumerable<Task> GetTasks()
-            {
-                foreach (var tuple in tuples)
-                {
-                    yield return SendData(tuple);
+                        await Task.WhenAll(GetTasks()).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.LogError(ex, "Failed to send updates to websockets");
+                    }
                 }
             }
-
-            await Task.WhenAll(GetTasks()).ConfigureAwait(false);
         }
 
-        private async Task SendData(Tuple<IWebSocketConnection, CancellationTokenSource, TStateType> tuple)
+        private async Task SendDataForConnectionAsync((IWebSocketConnection Connection, CancellationTokenSource CancellationTokenSource, TStateType State) tuple)
         {
-            var connection = tuple.Item1;
-
             try
             {
-                var state = tuple.Item3;
+                var (connection, cts, state) = tuple;
+                var cancellationToken = cts.Token;
 
-                var cancellationToken = tuple.Item2.Token;
+                // Restore the culture context captured when the connection was established
+                // so that GetDataToSendForConnection produces a localized payload matching
+                // the client's Accept-Language preference rather than the server default.
+                connection.ApplyRequestCulture();
 
-                var data = await GetDataToSend().ConfigureAwait(false);
-
-                if (data != null)
+                var data = await GetDataToSendForConnection(connection).ConfigureAwait(false);
+                if (data is null)
                 {
-                    await connection.SendAsync(
-                        new WebSocketMessage<TReturnDataType>
-                        {
-                            MessageId = Guid.NewGuid(),
-                            MessageType = Type,
-                            Data = data
-                        },
-                        cancellationToken).ConfigureAwait(false);
-
-                    state.DateLastSendUtc = DateTime.UtcNow;
+                    return;
                 }
+
+                await connection.SendAsync(
+                    new OutboundWebSocketMessage<TReturnDataType> { MessageType = Type, Data = data },
+                    cancellationToken).ConfigureAwait(false);
+
+                state.DateLastSendUtc = DateTime.UtcNow;
             }
             catch (OperationCanceledException)
             {
-                if (tuple.Item2.IsCancellationRequested)
+                if (tuple.CancellationTokenSource.IsCancellationRequested)
                 {
                     DisposeConnection(tuple);
                 }
@@ -205,11 +246,11 @@ namespace MediaBrowser.Controller.Net
         /// <param name="message">The message.</param>
         private void Stop(WebSocketMessageInfo message)
         {
-            lock (_activeConnections)
+            lock (_activeConnectionsLock)
             {
-                var connection = _activeConnections.FirstOrDefault(c => c.Item1 == message.Connection);
+                var connection = _activeConnections.FirstOrDefault(c => c.Connection == message.Connection);
 
-                if (connection != null)
+                if (connection != default)
                 {
                     DisposeConnection(connection);
                 }
@@ -220,53 +261,60 @@ namespace MediaBrowser.Controller.Net
         /// Disposes the connection.
         /// </summary>
         /// <param name="connection">The connection.</param>
-        private void DisposeConnection(Tuple<IWebSocketConnection, CancellationTokenSource, TStateType> connection)
+        private void DisposeConnection((IWebSocketConnection Connection, CancellationTokenSource CancellationTokenSource, TStateType State) connection)
         {
-            Logger.LogDebug("WS {1} stop transmitting to {0}", connection.Item1.RemoteEndPoint, GetType().Name);
+            Logger.LogDebug("WS {1} stop transmitting to {0}", connection.Connection.RemoteEndPoint, GetType().Name);
 
             // TODO disposing the connection seems to break websockets in subtle ways, so what is the purpose of this function really...
             // connection.Item1.Dispose();
 
             try
             {
-                connection.Item2.Cancel();
-                connection.Item2.Dispose();
+                connection.CancellationTokenSource.Cancel();
+                connection.CancellationTokenSource.Dispose();
             }
-            catch (ObjectDisposedException)
+            catch (ObjectDisposedException ex)
             {
                 // TODO Investigate and properly fix.
+                Logger.LogError(ex, "Object Disposed");
+            }
+            catch (Exception ex)
+            {
+                // TODO Investigate and properly fix.
+                Logger.LogError(ex, "Error disposing websocket");
             }
 
-            lock (_activeConnections)
+            lock (_activeConnectionsLock)
             {
                 _activeConnections.Remove(connection);
             }
         }
 
-        /// <summary>
-        /// Releases unmanaged and - optionally - managed resources.
-        /// </summary>
-        /// <param name="dispose"><c>true</c> to release both managed and unmanaged resources; <c>false</c> to release only unmanaged resources.</param>
-        protected virtual void Dispose(bool dispose)
+        protected virtual async ValueTask DisposeAsyncCore()
         {
-            if (dispose)
+            try
             {
-                lock (_activeConnections)
+                _channel.Writer.TryComplete();
+                await _messageConsumerTask.ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError(ex, "Disposing the message consumer failed");
+            }
+
+            lock (_activeConnectionsLock)
+            {
+                foreach (var connection in _activeConnections.ToList())
                 {
-                    foreach (var connection in _activeConnections.ToArray())
-                    {
-                        DisposeConnection(connection);
-                    }
+                    DisposeConnection(connection);
                 }
             }
         }
 
-        /// <summary>
-        /// Performs application-defined tasks associated with freeing, releasing, or resetting unmanaged resources.
-        /// </summary>
-        public void Dispose()
+        /// <inheritdoc />
+        public async ValueTask DisposeAsync()
         {
-            Dispose(true);
+            await DisposeAsyncCore().ConfigureAwait(false);
             GC.SuppressFinalize(this);
         }
     }

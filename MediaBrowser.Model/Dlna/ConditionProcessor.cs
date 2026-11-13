@@ -1,14 +1,40 @@
-#pragma warning disable CS1591
-
 using System;
 using System.Globalization;
-using System.Linq;
+using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
 using MediaBrowser.Model.MediaInfo;
 
 namespace MediaBrowser.Model.Dlna
 {
+    /// <summary>
+    /// The condition processor.
+    /// </summary>
     public static class ConditionProcessor
     {
+        /// <summary>
+        /// Checks if a video condition is satisfied.
+        /// </summary>
+        /// <param name="condition">The <see cref="ProfileCondition"/>.</param>
+        /// <param name="width">The width.</param>
+        /// <param name="height">The height.</param>
+        /// <param name="videoBitDepth">The bit depth.</param>
+        /// <param name="videoBitrate">The bitrate.</param>
+        /// <param name="videoProfile">The video profile.</param>
+        /// <param name="videoRangeType">The <see cref="VideoRangeType"/>.</param>
+        /// <param name="videoLevel">The video level.</param>
+        /// <param name="videoFramerate">The framerate.</param>
+        /// <param name="packetLength">The packet length.</param>
+        /// <param name="timestamp">The <see cref="TransportStreamTimestamp"/>.</param>
+        /// <param name="isAnamorphic">A value indicating whether the video is anamorphic.</param>
+        /// <param name="isInterlaced">A value indicating whether the video is interlaced.</param>
+        /// <param name="refFrames">The reference frames.</param>
+        /// <param name="numStreams">The number of streams.</param>
+        /// <param name="numVideoStreams">The number of video streams.</param>
+        /// <param name="numAudioStreams">The number of audio streams.</param>
+        /// <param name="videoCodecTag">The video codec tag.</param>
+        /// <param name="isAvc">A value indicating whether the video is AVC.</param>
+        /// <param name="videoRotation">The video rotation angle, usually 0 or +-90/180.</param>
+        /// <returns><b>True</b> if the condition is satisfied.</returns>
         public static bool IsVideoConditionSatisfied(
             ProfileCondition condition,
             int? width,
@@ -16,6 +42,7 @@ namespace MediaBrowser.Model.Dlna
             int? videoBitDepth,
             int? videoBitrate,
             string? videoProfile,
+            VideoRangeType? videoRangeType,
             double? videoLevel,
             float? videoFramerate,
             int? packetLength,
@@ -23,10 +50,12 @@ namespace MediaBrowser.Model.Dlna
             bool? isAnamorphic,
             bool? isInterlaced,
             int? refFrames,
+            int numStreams,
             int? numVideoStreams,
             int? numAudioStreams,
             string? videoCodecTag,
-            bool? isAvc)
+            bool? isAvc,
+            int? videoRotation)
         {
             switch (condition.Property)
             {
@@ -42,6 +71,8 @@ namespace MediaBrowser.Model.Dlna
                     return IsConditionSatisfied(condition, videoLevel);
                 case ProfileConditionValue.VideoProfile:
                     return IsConditionSatisfied(condition, videoProfile);
+                case ProfileConditionValue.VideoRangeType:
+                    return IsConditionSatisfied(condition, videoRangeType);
                 case ProfileConditionValue.VideoCodecTag:
                     return IsConditionSatisfied(condition, videoCodecTag);
                 case ProfileConditionValue.PacketLength:
@@ -56,17 +87,28 @@ namespace MediaBrowser.Model.Dlna
                     return IsConditionSatisfied(condition, width);
                 case ProfileConditionValue.RefFrames:
                     return IsConditionSatisfied(condition, refFrames);
+                case ProfileConditionValue.NumStreams:
+                    return IsConditionSatisfied(condition, numStreams);
                 case ProfileConditionValue.NumAudioStreams:
                     return IsConditionSatisfied(condition, numAudioStreams);
                 case ProfileConditionValue.NumVideoStreams:
                     return IsConditionSatisfied(condition, numVideoStreams);
                 case ProfileConditionValue.VideoTimestamp:
                     return IsConditionSatisfied(condition, timestamp);
+                case ProfileConditionValue.VideoRotation:
+                    return IsConditionSatisfied(condition, videoRotation);
                 default:
                     return true;
             }
         }
 
+        /// <summary>
+        /// Checks if a image condition is satisfied.
+        /// </summary>
+        /// <param name="condition">The <see cref="ProfileCondition"/>.</param>
+        /// <param name="width">The width.</param>
+        /// <param name="height">The height.</param>
+        /// <returns><b>True</b> if the condition is satisfied.</returns>
         public static bool IsImageConditionSatisfied(ProfileCondition condition, int? width, int? height)
         {
             switch (condition.Property)
@@ -80,6 +122,15 @@ namespace MediaBrowser.Model.Dlna
             }
         }
 
+        /// <summary>
+        /// Checks if an audio condition is satisfied.
+        /// </summary>
+        /// <param name="condition">The <see cref="ProfileCondition"/>.</param>
+        /// <param name="audioChannels">The channel count.</param>
+        /// <param name="audioBitrate">The bitrate.</param>
+        /// <param name="audioSampleRate">The sample rate.</param>
+        /// <param name="audioBitDepth">The bit depth.</param>
+        /// <returns><b>True</b> if the condition is satisfied.</returns>
         public static bool IsAudioConditionSatisfied(ProfileCondition condition, int? audioChannels, int? audioBitrate, int? audioSampleRate, int? audioBitDepth)
         {
             switch (condition.Property)
@@ -97,6 +148,17 @@ namespace MediaBrowser.Model.Dlna
             }
         }
 
+        /// <summary>
+        /// Checks if an audio condition is satisfied for a video.
+        /// </summary>
+        /// <param name="condition">The <see cref="ProfileCondition"/>.</param>
+        /// <param name="audioChannels">The channel count.</param>
+        /// <param name="audioBitrate">The bitrate.</param>
+        /// <param name="audioSampleRate">The sample rate.</param>
+        /// <param name="audioBitDepth">The bit depth.</param>
+        /// <param name="audioProfile">The profile.</param>
+        /// <param name="isSecondaryTrack">A value indicating whether the audio is a secondary track.</param>
+        /// <returns><b>True</b> if the condition is satisfied.</returns>
         public static bool IsVideoAudioConditionSatisfied(
             ProfileCondition condition,
             int? audioChannels,
@@ -133,12 +195,26 @@ namespace MediaBrowser.Model.Dlna
                 return !condition.IsRequired;
             }
 
-            if (int.TryParse(condition.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var expected))
+            var conditionType = condition.Condition;
+            if (condition.Condition == ProfileConditionType.EqualsAny)
             {
-                switch (condition.Condition)
+                foreach (var singleConditionString in condition.Value.AsSpan().Split('|'))
+                {
+                    if (int.TryParse(singleConditionString, NumberStyles.Integer, CultureInfo.InvariantCulture, out int conditionValue)
+                        && conditionValue.Equals(currentValue))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (int.TryParse(condition.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var expected))
+            {
+                switch (conditionType)
                 {
                     case ProfileConditionType.Equals:
-                    case ProfileConditionType.EqualsAny:
                         return currentValue.Value.Equals(expected);
                     case ProfileConditionType.GreaterThanEqual:
                         return currentValue.Value >= expected;
@@ -167,7 +243,7 @@ namespace MediaBrowser.Model.Dlna
             switch (condition.Condition)
             {
                 case ProfileConditionType.EqualsAny:
-                    return expected.Split('|').Contains(currentValue, StringComparer.OrdinalIgnoreCase);
+                    return expected.Split('|').Contains(currentValue, StringComparison.OrdinalIgnoreCase);
                 case ProfileConditionType.Equals:
                     return string.Equals(currentValue, expected, StringComparison.OrdinalIgnoreCase);
                 case ProfileConditionType.NotEquals:
@@ -209,9 +285,24 @@ namespace MediaBrowser.Model.Dlna
                 return !condition.IsRequired;
             }
 
-            if (double.TryParse(condition.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var expected))
+            var conditionType = condition.Condition;
+            if (condition.Condition == ProfileConditionType.EqualsAny)
             {
-                switch (condition.Condition)
+                foreach (var singleConditionString in condition.Value.AsSpan().Split('|'))
+                {
+                    if (double.TryParse(singleConditionString, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out double conditionValue)
+                        && conditionValue.Equals(currentValue))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (double.TryParse(condition.Value, NumberStyles.Float | NumberStyles.AllowThousands, CultureInfo.InvariantCulture, out var expected))
+            {
+                switch (conditionType)
                 {
                     case ProfileConditionType.Equals:
                         return currentValue.Value.Equals(expected);
@@ -237,7 +328,7 @@ namespace MediaBrowser.Model.Dlna
                 return !condition.IsRequired;
             }
 
-            var expected = (TransportStreamTimestamp)Enum.Parse(typeof(TransportStreamTimestamp), condition.Value, true);
+            var expected = Enum.Parse<TransportStreamTimestamp>(condition.Value, true);
 
             switch (condition.Condition)
             {
@@ -248,6 +339,51 @@ namespace MediaBrowser.Model.Dlna
                 default:
                     throw new InvalidOperationException("Unexpected ProfileConditionType: " + condition.Condition);
             }
+        }
+
+        private static bool IsConditionSatisfied(ProfileCondition condition, VideoRangeType? currentValue)
+        {
+            if (!currentValue.HasValue || currentValue.Equals(VideoRangeType.Unknown))
+            {
+                // If the value is unknown, it satisfies if not marked as required
+                return !condition.IsRequired;
+            }
+
+            // Special case: HDR10 also satisfies if the video is HDR10Plus
+            if (currentValue.Value == VideoRangeType.HDR10Plus)
+            {
+                if (IsConditionSatisfied(condition, VideoRangeType.HDR10))
+                {
+                    return true;
+                }
+            }
+
+            var conditionType = condition.Condition;
+            if (conditionType == ProfileConditionType.EqualsAny)
+            {
+                foreach (var singleConditionString in condition.Value.AsSpan().Split('|'))
+                {
+                    if (Enum.TryParse(singleConditionString, true, out VideoRangeType conditionValue)
+                        && conditionValue.Equals(currentValue))
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            if (Enum.TryParse(condition.Value, true, out VideoRangeType expected))
+            {
+                return conditionType switch
+                {
+                    ProfileConditionType.Equals => currentValue.Value == expected,
+                    ProfileConditionType.NotEquals => currentValue.Value != expected,
+                    _ => throw new InvalidOperationException("Unexpected ProfileConditionType: " + condition.Condition)
+                };
+            }
+
+            return false;
         }
     }
 }

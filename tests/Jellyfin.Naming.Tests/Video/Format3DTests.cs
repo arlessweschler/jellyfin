@@ -1,4 +1,4 @@
-﻿using Emby.Naming.Common;
+using Emby.Naming.Common;
 using Emby.Naming.Video;
 using Xunit;
 
@@ -20,10 +20,30 @@ namespace Jellyfin.Naming.Tests.Video
         }
 
         [Fact]
+        public void TestFormat3DAtEndOfPath()
+        {
+            // Directory based media (eg. DVD or BluRay folder rips) have no file extension,
+            // so the 3D tag can be the last token of the path.
+            Test("Super movie (2009) 3d hsbs", true, "hsbs");
+            Test("Super movie (2009).3d.sbs", true, "sbs");
+            Test("Super movie (2009) 3d htab", true, "htab");
+            Test("Super movie (2009).hsbs", true, "hsbs");
+            Test("Super movie (2009) 3d", false, null);
+        }
+
+        [Fact]
+        public void TestResolveDirectory3D()
+        {
+            var result = VideoResolver.ResolveDirectory("/movies/Oblivion (2013) 3d hsbs", _namingOptions);
+
+            Assert.True(result?.Is3D);
+            Assert.Equal("hsbs", result?.Format3D, true);
+        }
+
+        [Fact]
         public void Test3DName()
         {
-            var result =
-                new VideoResolver(_namingOptions).ResolveFile(@"C:/Users/media/Desktop/Video Test/Movies/Oblivion/Oblivion.3d.hsbs.mkv");
+            var result = VideoResolver.ResolveFile("C:/Users/media/Desktop/Video Test/Movies/Oblivion/Oblivion.3d.hsbs.mkv", _namingOptions);
 
             Assert.Equal("hsbs", result?.Format3D);
             Assert.Equal("Oblivion", result?.Name);
@@ -58,15 +78,13 @@ namespace Jellyfin.Naming.Tests.Video
 
         private void Test(string input, bool is3D, string? format3D)
         {
-            var parser = new Format3DParser(_namingOptions);
-
-            var result = parser.Parse(input);
+            var result = Format3DParser.Parse(input, _namingOptions);
 
             Assert.Equal(is3D, result.Is3D);
 
-            if (format3D == null)
+            if (format3D is null)
             {
-                Assert.Null(result.Format3D);
+                Assert.Null(result?.Format3D);
             }
             else
             {

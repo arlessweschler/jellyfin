@@ -4,9 +4,11 @@
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net.WebSockets;
 using System.Threading.Tasks;
+using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Net;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -35,32 +37,43 @@ namespace Emby.Server.Implementations.HttpServer
         /// <inheritdoc />
         public async Task WebSocketRequestHandler(HttpContext context)
         {
-            _ = _authService.Authenticate(context.Request);
+            var authorizationInfo = await _authService.Authenticate(context.Request).ConfigureAwait(false);
+            if (!authorizationInfo.IsAuthenticated)
+            {
+                throw new SecurityException("Token is required");
+            }
+
             try
             {
                 _logger.LogInformation("WS {IP} request", context.Connection.RemoteIpAddress);
 
                 WebSocket webSocket = await context.WebSockets.AcceptWebSocketAsync().ConfigureAwait(false);
-
-                using var connection = new WebSocketConnection(
+                var connection = new WebSocketConnection(
                     _loggerFactory.CreateLogger<WebSocketConnection>(),
                     webSocket,
-                    context.Connection.RemoteIpAddress,
-                    context.Request.Query)
+                    authorizationInfo,
+                    context.GetNormalizedRemoteIP())
                 {
-                    OnReceive = ProcessWebSocketMessageReceived
+                    RequestUICulture = CultureInfo.CurrentUICulture
                 };
-
-                var tasks = new Task[_webSocketListeners.Length];
-                for (var i = 0; i < _webSocketListeners.Length; ++i)
+                connection.OnReceive = result =>
                 {
-                    tasks[i] = _webSocketListeners[i].ProcessWebSocketConnectedAsync(connection);
+                    connection.ApplyRequestCulture();
+                    return ProcessWebSocketMessageReceived(result);
+                };
+                await using (connection.ConfigureAwait(false))
+                {
+                    var tasks = new Task[_webSocketListeners.Length];
+                    for (var i = 0; i < _webSocketListeners.Length; ++i)
+                    {
+                        tasks[i] = _webSocketListeners[i].ProcessWebSocketConnectedAsync(connection, context);
+                    }
+
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
+
+                    await connection.ReceiveAsync().ConfigureAwait(false);
+                    _logger.LogInformation("WS {IP} closed", context.Connection.RemoteIpAddress);
                 }
-
-                await Task.WhenAll(tasks).ConfigureAwait(false);
-
-                await connection.ProcessAsync().ConfigureAwait(false);
-                _logger.LogInformation("WS {IP} closed", context.Connection.RemoteIpAddress);
             }
             catch (Exception ex) // Otherwise ASP.Net will ignore the exception
             {
@@ -76,7 +89,7 @@ namespace Emby.Server.Implementations.HttpServer
         /// Processes the web socket message received.
         /// </summary>
         /// <param name="result">The result.</param>
-        private Task ProcessWebSocketMessageReceived(WebSocketMessageInfo result)
+        private async Task ProcessWebSocketMessageReceived(WebSocketMessageInfo result)
         {
             var tasks = new Task[_webSocketListeners.Length];
             for (var i = 0; i < _webSocketListeners.Length; ++i)
@@ -84,7 +97,7 @@ namespace Emby.Server.Implementations.HttpServer
                 tasks[i] = _webSocketListeners[i].ProcessMessageAsync(result);
             }
 
-            return Task.WhenAll(tasks);
+            await Task.WhenAll(tasks).ConfigureAwait(false);
         }
     }
 }

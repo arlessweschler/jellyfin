@@ -1,24 +1,37 @@
 using System;
+using System.Globalization;
+using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Mime;
 using System.Text;
-using Jellyfin.Networking.Configuration;
+using Emby.Server.Implementations.EntryPoints;
+using Emby.Server.Implementations.Localization;
+using Jellyfin.Api.Middleware;
+using Jellyfin.Database.Implementations;
+using Jellyfin.LiveTv.Extensions;
+using Jellyfin.LiveTv.Recordings;
+using Jellyfin.MediaEncoding.Hls.Extensions;
+using Jellyfin.Networking;
+using Jellyfin.Networking.HappyEyeballs;
 using Jellyfin.Server.Extensions;
-using Jellyfin.Server.Implementations;
-using Jellyfin.Server.Middleware;
+using Jellyfin.Server.HealthChecks;
+using Jellyfin.Server.Implementations.Extensions;
+using Jellyfin.Server.Implementations.Users;
 using MediaBrowser.Common.Net;
-using MediaBrowser.Controller;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Extensions;
+using MediaBrowser.XbmcMetadata;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Localization;
 using Microsoft.AspNetCore.StaticFiles;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Primitives;
 using Prometheus;
 
 namespace Jellyfin.Server
@@ -28,20 +41,20 @@ namespace Jellyfin.Server
     /// </summary>
     public class Startup
     {
+        private readonly CoreAppHost _serverApplicationHost;
+        private readonly IConfiguration _configuration;
         private readonly IServerConfigurationManager _serverConfigurationManager;
-        private readonly IServerApplicationHost _serverApplicationHost;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="Startup" /> class.
         /// </summary>
-        /// <param name="serverConfigurationManager">The server configuration manager.</param>
-        /// <param name="serverApplicationHost">The server application host.</param>
-        public Startup(
-            IServerConfigurationManager serverConfigurationManager,
-            IServerApplicationHost serverApplicationHost)
+        /// <param name="appHost">The server application host.</param>
+        /// <param name="configuration">The used Configuration.</param>
+        public Startup(CoreAppHost appHost, IConfiguration configuration)
         {
-            _serverConfigurationManager = serverConfigurationManager;
-            _serverApplicationHost = serverApplicationHost;
+            _serverApplicationHost = appHost;
+            _configuration = configuration;
+            _serverConfigurationManager = appHost.ConfigurationManager;
         }
 
         /// <summary>
@@ -56,8 +69,9 @@ namespace Jellyfin.Server
             {
                 options.HttpsPort = _serverApplicationHost.HttpsPort;
             });
-            services.AddJellyfinApi(_serverApplicationHost.GetApiPluginAssemblies(), _serverConfigurationManager.GetNetworkConfiguration());
 
+            services.AddJellyfinApi(_serverApplicationHost.GetApiPluginAssemblies(), _serverConfigurationManager.GetNetworkConfiguration());
+            services.AddJellyfinDbContext(_serverApplicationHost.ConfigurationManager, _configuration);
             services.AddJellyfinApiSwagger();
 
             // configure custom legacy authentication
@@ -71,21 +85,27 @@ namespace Jellyfin.Server
             var acceptJsonHeader = new MediaTypeWithQualityHeaderValue(MediaTypeNames.Application.Json, 1.0);
             var acceptXmlHeader = new MediaTypeWithQualityHeaderValue(MediaTypeNames.Application.Xml, 0.9);
             var acceptAnyHeader = new MediaTypeWithQualityHeaderValue("*/*", 0.8);
+            Func<IServiceProvider, HttpMessageHandler> eyeballsHttpClientHandlerDelegate = (_) => new SocketsHttpHandler()
+            {
+                AutomaticDecompression = DecompressionMethods.All,
+                RequestHeaderEncodingSelector = (_, _) => Encoding.UTF8,
+                ConnectCallback = HttpClientExtension.OnConnect
+            };
+
             Func<IServiceProvider, HttpMessageHandler> defaultHttpClientHandlerDelegate = (_) => new SocketsHttpHandler()
             {
                 AutomaticDecompression = DecompressionMethods.All,
                 RequestHeaderEncodingSelector = (_, _) => Encoding.UTF8
             };
 
-            services
-                .AddHttpClient(NamedClient.Default, c =>
+            services.AddHttpClient(NamedClient.Default, c =>
                 {
                     c.DefaultRequestHeaders.UserAgent.Add(productHeader);
                     c.DefaultRequestHeaders.Accept.Add(acceptJsonHeader);
                     c.DefaultRequestHeaders.Accept.Add(acceptXmlHeader);
                     c.DefaultRequestHeaders.Accept.Add(acceptAnyHeader);
                 })
-                .ConfigurePrimaryHttpMessageHandler(defaultHttpClientHandlerDelegate);
+                .ConfigurePrimaryHttpMessageHandler(eyeballsHttpClientHandlerDelegate);
 
             services.AddHttpClient(NamedClient.MusicBrainz, c =>
                 {
@@ -94,10 +114,49 @@ namespace Jellyfin.Server
                     c.DefaultRequestHeaders.Accept.Add(acceptXmlHeader);
                     c.DefaultRequestHeaders.Accept.Add(acceptAnyHeader);
                 })
+                .ConfigurePrimaryHttpMessageHandler(eyeballsHttpClientHandlerDelegate);
+
+            services.AddHttpClient(NamedClient.DirectIp, c =>
+                {
+                    c.DefaultRequestHeaders.UserAgent.Add(productHeader);
+                    c.DefaultRequestHeaders.Accept.Add(acceptJsonHeader);
+                    c.DefaultRequestHeaders.Accept.Add(acceptXmlHeader);
+                    c.DefaultRequestHeaders.Accept.Add(acceptAnyHeader);
+                })
                 .ConfigurePrimaryHttpMessageHandler(defaultHttpClientHandlerDelegate);
 
             services.AddHealthChecks()
-                .AddDbContextCheck<JellyfinDb>();
+                .AddCheck<DbContextFactoryHealthCheck<JellyfinDbContext>>(nameof(JellyfinDbContext));
+
+            services.AddHlsPlaylistGenerator();
+            services.AddLiveTvServices();
+
+            var serverUICulture = _serverConfigurationManager.Configuration.UICulture;
+            if (string.IsNullOrEmpty(serverUICulture))
+            {
+                serverUICulture = "en-US";
+            }
+
+            CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo(serverUICulture);
+
+            services.Configure<RequestLocalizationOptions>(options =>
+            {
+                var supportedUICultures = LocalizationManager.GetSupportedUICultures();
+                options.SupportedCultures = supportedUICultures;
+                options.SupportedUICultures = supportedUICultures;
+                options.DefaultRequestCulture = new RequestCulture(serverUICulture);
+                options.ApplyCurrentCultureToResponseHeaders = true;
+                options.FallBackToParentCultures = true;
+                options.FallBackToParentUICultures = true;
+            });
+
+            services.AddHostedService<RecordingsHost>();
+            services.AddHostedService<AutoDiscoveryHost>();
+            services.AddHostedService<NfoUserDataSaver>();
+            services.AddHostedService<LibraryChangedNotifier>();
+            services.AddHostedService<UserDataChangeNotifier>();
+            services.AddHostedService<RecordingNotifier>();
+            services.AddHostedService<DeviceAccessHost>();
         }
 
         /// <summary>
@@ -133,14 +192,13 @@ namespace Jellyfin.Server
 
                 mainApp.UseCors();
 
+                mainApp.UseRequestLocalization();
+
                 if (config.RequireHttps && _serverApplicationHost.ListenWithHttps)
                 {
                     mainApp.UseHttpsRedirection();
                 }
 
-                // This must be injected before any path related middleware.
-                mainApp.UsePathTrim();
-                mainApp.UseStaticFiles();
                 if (appConfig.HostWebClient())
                 {
                     var extensionProvider = new FileExtensionContentTypeProvider();
@@ -148,23 +206,36 @@ namespace Jellyfin.Server
                     // subtitles octopus requires .data, .mem files.
                     extensionProvider.Mappings.Add(".data", MediaTypeNames.Application.Octet);
                     extensionProvider.Mappings.Add(".mem", MediaTypeNames.Application.Octet);
+                    mainApp.UseDefaultFiles(new DefaultFilesOptions
+                    {
+                        FileProvider = new PhysicalFileProvider(_serverConfigurationManager.ApplicationPaths.WebPath),
+                        RequestPath = "/web"
+                    });
                     mainApp.UseStaticFiles(new StaticFileOptions
                     {
                         FileProvider = new PhysicalFileProvider(_serverConfigurationManager.ApplicationPaths.WebPath),
                         RequestPath = "/web",
-                        ContentTypeProvider = extensionProvider
+                        ContentTypeProvider = extensionProvider,
+                        OnPrepareResponse = (context) =>
+                        {
+                            if (Path.GetFileName(context.File.Name).Equals("index.html", StringComparison.Ordinal))
+                            {
+                                context.Context.Response.Headers.CacheControl = new StringValues("no-cache");
+                            }
+                        }
                     });
 
                     mainApp.UseRobotsRedirection();
                 }
 
+                mainApp.UseStaticFiles();
                 mainApp.UseAuthentication();
                 mainApp.UseJellyfinApiSwagger(_serverConfigurationManager);
+                mainApp.UseQueryStringDecoding();
                 mainApp.UseRouting();
                 mainApp.UseAuthorization();
 
-                mainApp.UseLanFiltering();
-                mainApp.UseIpBasedAccessValidation();
+                mainApp.UseIPBasedAccessValidation();
                 mainApp.UseWebSocketHandler();
                 mainApp.UseServerStartupMessage();
 
@@ -179,7 +250,7 @@ namespace Jellyfin.Server
                     endpoints.MapControllers();
                     if (_serverConfigurationManager.Configuration.EnableMetrics)
                     {
-                        endpoints.MapMetrics("/metrics");
+                        endpoints.MapMetrics();
                     }
 
                     endpoints.MapHealthChecks("/health");

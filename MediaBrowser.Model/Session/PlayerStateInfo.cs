@@ -64,5 +64,17 @@ namespace MediaBrowser.Model.Session
         /// </summary>
         /// <value>The repeat mode.</value>
         public RepeatMode RepeatMode { get; set; }
+
+        /// <summary>
+        /// Gets or sets the playback order.
+        /// </summary>
+        /// <value>The playback order.</value>
+        public PlaybackOrder PlaybackOrder { get; set; }
+
+        /// <summary>
+        /// Gets or sets the now playing live stream identifier.
+        /// </summary>
+        /// <value>The live stream identifier.</value>
+        public string LiveStreamId { get; set; }
     }
 }

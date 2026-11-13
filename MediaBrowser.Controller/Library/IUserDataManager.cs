@@ -1,11 +1,7 @@
-#nullable disable
-
-#pragma warning disable CS1591
-
 using System;
 using System.Collections.Generic;
 using System.Threading;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Dto;
@@ -21,49 +17,94 @@ namespace MediaBrowser.Controller.Library
         /// <summary>
         /// Occurs when [user data saved].
         /// </summary>
-        event EventHandler<UserDataSaveEventArgs> UserDataSaved;
+        event EventHandler<UserDataSaveEventArgs>? UserDataSaved;
 
         /// <summary>
         /// Saves the user data.
         /// </summary>
-        /// <param name="userId">The user id.</param>
+        /// <param name="user">The user.</param>
         /// <param name="item">The item.</param>
         /// <param name="userData">The user data.</param>
         /// <param name="reason">The reason.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
-        void SaveUserData(Guid userId, BaseItem item, UserItemData userData, UserDataSaveReason reason, CancellationToken cancellationToken);
-
         void SaveUserData(User user, BaseItem item, UserItemData userData, UserDataSaveReason reason, CancellationToken cancellationToken);
 
-        UserItemData GetUserData(User user, BaseItem item);
+        /// <summary>
+        /// Save the provided user data for the given user.
+        /// </summary>
+        /// <param name="user">The user.</param>
+        /// <param name="item">The item.</param>
+        /// <param name="userDataDto">The reason for updating the user data.</param>
+        /// <param name="reason">The reason.</param>
+        void SaveUserData(User user, BaseItem item, UpdateUserItemDataDto userDataDto, UserDataSaveReason reason);
 
-        UserItemData GetUserData(Guid userId, BaseItem item);
+        /// <summary>
+        /// Gets the user data.
+        /// </summary>
+        /// <param name="user">User to use.</param>
+        /// <param name="item">Item to use.</param>
+        /// <returns>User data.</returns>
+        UserItemData? GetUserData(User user, BaseItem item);
 
         /// <summary>
         /// Gets the user data dto.
         /// </summary>
-        UserItemDataDto GetUserDataDto(BaseItem item, User user);
-
-        UserItemDataDto GetUserDataDto(BaseItem item, BaseItemDto itemDto, User user, DtoOptions dto_options);
-
-        /// <summary>
-        /// Get all user data for the given user.
-        /// </summary>
-        /// <param name="userId">The user id.</param>
-        /// <returns>The user item data.</returns>
-        List<UserItemData> GetAllUserData(Guid userId);
+        /// <param name="item">Item to use.</param>
+        /// <param name="user">User to use.</param>
+        /// <returns>User data dto.</returns>
+        UserItemDataDto? GetUserDataDto(BaseItem item, User user);
 
         /// <summary>
-        /// Save the all provided user data for the given user.
+        /// Gets user data for multiple items in a single batch operation.
         /// </summary>
-        /// <param name="userId">The user id.</param>
-        /// <param name="userData">The array of user data.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        void SaveAllUserData(Guid userId, UserItemData[] userData, CancellationToken cancellationToken);
+        /// <param name="items">The items to get user data for.</param>
+        /// <param name="user">The user.</param>
+        /// <returns>A dictionary mapping item IDs to their user data.</returns>
+        Dictionary<Guid, UserItemData> GetUserDataBatch(IReadOnlyList<BaseItem> items, User user);
+
+        /// <summary>
+        /// Gets the user data that should drive resume for a multi-version item: the data of the most
+        /// recently played alternate version (including the item itself) that has a resume point.
+        /// </summary>
+        /// <param name="user">The user.</param>
+        /// <param name="item">The item.</param>
+        /// <returns>The resume version's data, or <c>null</c> when the item has no versions or none has a resume point.</returns>
+        VersionResumeData? GetResumeUserData(User user, BaseItem item);
+
+        /// <summary>
+        /// Gets the resume-driving user data for multiple items in a single batch operation.
+        /// See <see cref="GetResumeUserData(User, BaseItem)"/>.
+        /// </summary>
+        /// <param name="items">The items to get resume data for.</param>
+        /// <param name="user">The user.</param>
+        /// <returns>A dictionary mapping item ids to their resume version's data; items without one are omitted.</returns>
+        IReadOnlyDictionary<Guid, VersionResumeData> GetResumeUserDataBatch(IReadOnlyList<BaseItem> items, User user);
+
+        /// <summary>
+        /// Gets the user data dto.
+        /// </summary>
+        /// <param name="item">Item to use.</param>
+        /// <param name="itemDto">Item dto to use.</param>
+        /// <param name="user">User to use.</param>
+        /// <param name="options">Dto options to use.</param>
+        /// <returns>User data dto.</returns>
+        UserItemDataDto? GetUserDataDto(BaseItem item, BaseItemDto? itemDto, User user, DtoOptions options);
 
         /// <summary>
         /// Updates playstate for an item and returns true or false indicating if it was played to completion.
         /// </summary>
-        bool UpdatePlayState(BaseItem item, UserItemData data, long? positionTicks);
+        /// <param name="item">Item to update.</param>
+        /// <param name="data">Data to update.</param>
+        /// <param name="reportedPositionTicks">New playstate.</param>
+        /// <returns>True if playstate was updated.</returns>
+        bool UpdatePlayState(BaseItem item, UserItemData data, long? reportedPositionTicks);
+
+        /// <summary>
+        /// Clears any stored audio and subtitle stream selections for the given user/item pair.
+        /// Used when the user has opted out of remembering selections.
+        /// </summary>
+        /// <param name="user">The user.</param>
+        /// <param name="item">The item.</param>
+        void ResetPlaybackStreamSelections(User user, BaseItem item);
     }
 }

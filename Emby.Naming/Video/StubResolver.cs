@@ -1,7 +1,7 @@
 using System;
 using System.IO;
-using System.Linq;
 using Emby.Naming.Common;
+using Jellyfin.Extensions;
 
 namespace Emby.Naming.Video
 {
@@ -26,19 +26,18 @@ namespace Emby.Naming.Video
                 return false;
             }
 
-            var extension = Path.GetExtension(path);
+            var extension = Path.GetExtension(path.AsSpan());
 
-            if (!options.StubFileExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+            if (!options.StubFileExtensions.Contains(extension, StringComparison.OrdinalIgnoreCase))
             {
                 return false;
             }
 
-            path = Path.GetFileNameWithoutExtension(path);
-            var token = Path.GetExtension(path).TrimStart('.');
+            var token = Path.GetExtension(Path.GetFileNameWithoutExtension(path.AsSpan())).TrimStart('.');
 
             foreach (var rule in options.StubTypes)
             {
-                if (string.Equals(rule.Token, token, StringComparison.OrdinalIgnoreCase))
+                if (token.Equals(rule.Token, StringComparison.OrdinalIgnoreCase))
                 {
                     stubType = rule.StubType;
                     return true;

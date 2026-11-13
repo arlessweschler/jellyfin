@@ -1,57 +1,92 @@
 using System;
 using System.Threading.Tasks;
-using Jellyfin.Api.Constants;
+using Jellyfin.Api.Helpers;
+using Jellyfin.Data.Enums;
 using Jellyfin.Data.Queries;
+using Jellyfin.Database.Implementations.Enums;
+using MediaBrowser.Common.Api;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Querying;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Logging;
 
-namespace Jellyfin.Api.Controllers
+namespace Jellyfin.Api.Controllers;
+
+/// <summary>
+/// Activity log controller.
+/// </summary>
+[Route("System/ActivityLog")]
+[Authorize(Policy = Policies.RequiresElevation)]
+[Tags("System")]
+public class ActivityLogController : BaseJellyfinApiController
 {
+    private readonly IActivityManager _activityManager;
+
     /// <summary>
-    /// Activity log controller.
+    /// Initializes a new instance of the <see cref="ActivityLogController"/> class.
     /// </summary>
-    [Route("System/ActivityLog")]
-    [Authorize(Policy = Policies.RequiresElevation)]
-    public class ActivityLogController : BaseJellyfinApiController
+    /// <param name="activityManager">Instance of <see cref="IActivityManager"/> interface.</param>
+    public ActivityLogController(IActivityManager activityManager)
     {
-        private readonly IActivityManager _activityManager;
+        _activityManager = activityManager;
+    }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ActivityLogController"/> class.
-        /// </summary>
-        /// <param name="activityManager">Instance of <see cref="IActivityManager"/> interface.</param>
-        public ActivityLogController(IActivityManager activityManager)
+    /// <summary>
+    /// Gets activity log entries.
+    /// </summary>
+    /// <param name="startIndex">The record index to start at. All items with a lower index will be dropped from the results.</param>
+    /// <param name="limit">The maximum number of records to return.</param>
+    /// <param name="minDate">The minimum date.</param>
+    /// <param name="maxDate">The maximum date.</param>
+    /// <param name="hasUserId">Filter log entries if it has user id, or not.</param>
+    /// <param name="name">Filter by name.</param>
+    /// <param name="overview">Filter by overview.</param>
+    /// <param name="shortOverview">Filter by short overview.</param>
+    /// <param name="type">Filter by type.</param>
+    /// <param name="itemId">Filter by item id.</param>
+    /// <param name="username">Filter by username.</param>
+    /// <param name="severity">Filter by log severity.</param>
+    /// <param name="sortBy">Specify one or more sort orders. Format: SortBy=Name,Type.</param>
+    /// <param name="sortOrder">Sort Order..</param>
+    /// <response code="200">Activity log returned.</response>
+    /// <returns>A <see cref="QueryResult{ActivityLogEntry}"/> containing the log entries.</returns>
+    [HttpGet("Entries")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    public async Task<ActionResult<QueryResult<ActivityLogEntry>>> GetLogEntries(
+        [FromQuery] int? startIndex,
+        [FromQuery] int? limit,
+        [FromQuery] DateTime? minDate,
+        [FromQuery] DateTime? maxDate,
+        [FromQuery] bool? hasUserId,
+        [FromQuery] string? name,
+        [FromQuery] string? overview,
+        [FromQuery] string? shortOverview,
+        [FromQuery] string? type,
+        [FromQuery] Guid? itemId,
+        [FromQuery] string? username,
+        [FromQuery] LogLevel? severity,
+        [FromQuery] ActivityLogSortBy[]? sortBy,
+        [FromQuery] SortOrder[]? sortOrder)
+    {
+        var query = new ActivityLogQuery
         {
-            _activityManager = activityManager;
-        }
+            Skip = startIndex,
+            Limit = limit,
+            MinDate = minDate,
+            MaxDate = maxDate,
+            HasUserId = hasUserId,
+            Name = name,
+            Overview = overview,
+            ShortOverview = shortOverview,
+            Type = type,
+            ItemId = itemId,
+            Username = username,
+            Severity = severity,
+            OrderBy = RequestHelpers.GetOrderBy(sortBy ?? [], sortOrder ?? []),
+        };
 
-        /// <summary>
-        /// Gets activity log entries.
-        /// </summary>
-        /// <param name="startIndex">Optional. The record index to start at. All items with a lower index will be dropped from the results.</param>
-        /// <param name="limit">Optional. The maximum number of records to return.</param>
-        /// <param name="minDate">Optional. The minimum date. Format = ISO.</param>
-        /// <param name="hasUserId">Optional. Filter log entries if it has user id, or not.</param>
-        /// <response code="200">Activity log returned.</response>
-        /// <returns>A <see cref="QueryResult{ActivityLogEntry}"/> containing the log entries.</returns>
-        [HttpGet("Entries")]
-        [ProducesResponseType(StatusCodes.Status200OK)]
-        public async Task<ActionResult<QueryResult<ActivityLogEntry>>> GetLogEntries(
-            [FromQuery] int? startIndex,
-            [FromQuery] int? limit,
-            [FromQuery] DateTime? minDate,
-            [FromQuery] bool? hasUserId)
-        {
-            return await _activityManager.GetPagedResultAsync(new ActivityLogQuery
-            {
-                StartIndex = startIndex,
-                Limit = limit,
-                MinDate = minDate,
-                HasUserId = hasUserId
-            }).ConfigureAwait(false);
-        }
+        return await _activityManager.GetPagedResultAsync(query).ConfigureAwait(false);
     }
 }

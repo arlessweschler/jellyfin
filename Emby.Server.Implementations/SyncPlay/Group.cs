@@ -5,11 +5,13 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Session;
 using MediaBrowser.Controller.SyncPlay;
 using MediaBrowser.Controller.SyncPlay.GroupStates;
+using MediaBrowser.Controller.SyncPlay.PlaybackRequests;
 using MediaBrowser.Controller.SyncPlay.Queue;
 using MediaBrowser.Controller.SyncPlay.Requests;
 using MediaBrowser.Model.SyncPlay;
@@ -25,6 +27,11 @@ namespace Emby.Server.Implementations.SyncPlay
     /// </remarks>
     public class Group : IGroupStateContext
     {
+        /// <summary>
+        /// The default value of <see cref="GroupWaitTimeout"/>, in milliseconds.
+        /// </summary>
+        internal const long DefaultGroupWaitTimeout = 30000;
+
         /// <summary>
         /// The logger.
         /// </summary>
@@ -53,8 +60,12 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <summary>
         /// The participants, or members of the group.
         /// </summary>
-        private readonly Dictionary<string, GroupMember> _participants =
-            new Dictionary<string, GroupMember>(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, GroupMember> _participants = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// The sessions of the participants, which only carry identifiers.
+        /// </summary>
+        private readonly Dictionary<string, SessionInfo> _participantSessions = new(StringComparer.OrdinalIgnoreCase);
 
         /// <summary>
         /// The internal group state.
@@ -90,6 +101,18 @@ namespace Emby.Server.Implementations.SyncPlay
         public long DefaultPing { get; } = 500;
 
         /// <summary>
+        /// Gets the maximum ping, in milliseconds, accepted from a session.
+        /// </summary>
+        /// <remarks>
+        /// Pings are reported by clients and are scaled into the delays used to schedule playback,
+        /// so an unbounded value lets a single session push the whole group's resume point
+        /// arbitrarily far out, or overflow the arithmetic entirely. Anything above this is not a
+        /// usable measurement for synchronisation.
+        /// </remarks>
+        /// <value>The maximum ping.</value>
+        public long MaxPing { get; } = 10000;
+
+        /// <summary>
         /// Gets the maximum time offset error accepted for dates reported by clients, in milliseconds.
         /// </summary>
         /// <value>The maximum time offset error.</value>
@@ -100,6 +123,19 @@ namespace Emby.Server.Implementations.SyncPlay
         /// </summary>
         /// <value>The maximum offset error.</value>
         public long MaxPlaybackOffset { get; } = 500;
+
+        /// <summary>
+        /// Gets the maximum time, in milliseconds, the group waits for its members to report ready.
+        /// </summary>
+        /// <value>The group-wait timeout.</value>
+        internal long GroupWaitTimeout { get; init; } = DefaultGroupWaitTimeout;
+
+        /// <summary>
+        /// Gets the <see cref="Environment.TickCount64"/> value at which the group gives up waiting
+        /// for its members, or <c>null</c> when it is not waiting for anyone.
+        /// </summary>
+        /// <value>The group-wait deadline.</value>
+        internal long? GroupWaitDeadline { get; private set; }
 
         /// <summary>
         /// Gets the group identifier.
@@ -150,6 +186,8 @@ namespace Emby.Server.Implementations.SyncPlay
                     Ping = DefaultPing,
                     IsBuffering = false
                 });
+
+            _participantSessions[session.Id] = session;
         }
 
         /// <summary>
@@ -159,31 +197,33 @@ namespace Emby.Server.Implementations.SyncPlay
         private void RemoveSession(SessionInfo session)
         {
             _participants.Remove(session.Id);
+            _participantSessions.Remove(session.Id);
+            UpdateGroupWaitDeadline(false);
         }
 
         /// <summary>
         /// Filters sessions of this group.
         /// </summary>
-        /// <param name="from">The current session.</param>
+        /// <param name="fromId">The current session identifier.</param>
         /// <param name="type">The filtering type.</param>
         /// <returns>The list of sessions matching the filter.</returns>
-        private IEnumerable<SessionInfo> FilterSessions(SessionInfo from, SyncPlayBroadcastType type)
+        private IEnumerable<string> FilterSessions(string fromId, SyncPlayBroadcastType type)
         {
             return type switch
             {
-                SyncPlayBroadcastType.CurrentSession => new SessionInfo[] { from },
+                SyncPlayBroadcastType.CurrentSession => new string[] { fromId },
                 SyncPlayBroadcastType.AllGroup => _participants
                     .Values
-                    .Select(session => session.Session),
+                    .Select(member => member.SessionId),
                 SyncPlayBroadcastType.AllExceptCurrentSession => _participants
                     .Values
-                    .Select(session => session.Session)
-                    .Where(session => !session.Id.Equals(from.Id, StringComparison.OrdinalIgnoreCase)),
+                    .Select(member => member.SessionId)
+                    .Where(sessionId => !sessionId.Equals(fromId, StringComparison.OrdinalIgnoreCase)),
                 SyncPlayBroadcastType.AllReady => _participants
                     .Values
-                    .Where(session => !session.IsBuffering)
-                    .Select(session => session.Session),
-                _ => Enumerable.Empty<SessionInfo>()
+                    .Where(member => !member.IsBuffering)
+                    .Select(member => member.SessionId),
+                _ => Enumerable.Empty<string>()
             };
         }
 
@@ -197,7 +237,7 @@ namespace Emby.Server.Implementations.SyncPlay
         private bool HasAccessToQueue(User user, IReadOnlyList<Guid> queue)
         {
             // Check if queue is empty.
-            if (queue == null || queue.Count == 0)
+            if (queue is null || queue.Count == 0)
             {
                 return true;
             }
@@ -205,7 +245,8 @@ namespace Emby.Server.Implementations.SyncPlay
             foreach (var itemId in queue)
             {
                 var item = _libraryManager.GetItemById(itemId);
-                if (!item.IsVisibleStandalone(user))
+
+                if (item is null || !item.IsVisibleStandalone(user))
                 {
                     return false;
                 }
@@ -217,7 +258,7 @@ namespace Emby.Server.Implementations.SyncPlay
         private bool AllUsersHaveAccessToQueue(IReadOnlyList<Guid> queue)
         {
             // Check if queue is empty.
-            if (queue == null || queue.Count == 0)
+            if (queue is null || queue.Count == 0)
             {
                 return true;
             }
@@ -225,7 +266,7 @@ namespace Emby.Server.Implementations.SyncPlay
             // Get list of users.
             var users = _participants
                 .Values
-                .Select(participant => _userManager.GetUserById(participant.Session.UserId));
+                .Select(participant => _userManager.GetUserById(participant.UserId));
 
             // Find problematic users.
             var usersWithNoAccess = users.Where(user => !HasAccessToQueue(user, queue));
@@ -251,7 +292,7 @@ namespace Emby.Server.Implementations.SyncPlay
             GroupName = request.GroupName;
             AddSession(session);
 
-            var sessionIsPlayingAnItem = session.FullNowPlayingItem != null;
+            var sessionIsPlayingAnItem = session.FullNowPlayingItem is not null;
 
             RestartCurrentItem();
 
@@ -272,7 +313,7 @@ namespace Emby.Server.Implementations.SyncPlay
                 SetState(waitingState);
             }
 
-            var updateSession = NewSyncPlayGroupUpdate(GroupUpdateType.GroupJoined, GetInfo());
+            var updateSession = new SyncPlayGroupJoinedUpdate(GroupId, GetInfo());
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
             _state.SessionJoined(this, _state.Type, session, cancellationToken);
@@ -290,10 +331,10 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             AddSession(session);
 
-            var updateSession = NewSyncPlayGroupUpdate(GroupUpdateType.GroupJoined, GetInfo());
+            var updateSession = new SyncPlayGroupJoinedUpdate(GroupId, GetInfo());
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
-            var updateOthers = NewSyncPlayGroupUpdate(GroupUpdateType.UserJoined, session.UserName);
+            var updateOthers = new SyncPlayUserJoinedUpdate(GroupId, session.UserName);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
 
             _state.SessionJoined(this, _state.Type, session, cancellationToken);
@@ -313,10 +354,10 @@ namespace Emby.Server.Implementations.SyncPlay
 
             RemoveSession(session);
 
-            var updateSession = NewSyncPlayGroupUpdate(GroupUpdateType.GroupLeft, GroupId.ToString());
+            var updateSession = new SyncPlayGroupLeftUpdate(GroupId, GroupId.ToString());
             SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
 
-            var updateOthers = NewSyncPlayGroupUpdate(GroupUpdateType.UserLeft, session.UserName);
+            var updateOthers = new SyncPlayUserLeftUpdate(GroupId, session.UserName);
             SendGroupUpdate(session, SyncPlayBroadcastType.AllExceptCurrentSession, updateOthers, cancellationToken);
 
             _logger.LogInformation("Session {SessionId} left group {GroupId}.", session.Id, GroupId.ToString());
@@ -353,7 +394,7 @@ namespace Emby.Server.Implementations.SyncPlay
         /// <returns>The group info for the clients.</returns>
         public GroupInfoDto GetInfo()
         {
-            var participants = _participants.Values.Select(session => session.Session.UserName).Distinct().ToList();
+            var participants = _participants.Values.Select(session => session.UserName).Distinct().ToList();
             return new GroupInfoDto(GroupId, GroupName, _state.Type, participants, DateTime.UtcNow);
         }
 
@@ -375,13 +416,20 @@ namespace Emby.Server.Implementations.SyncPlay
             {
                 value.IgnoreGroupWait = ignoreGroupWait;
             }
+
+            UpdateGroupWaitDeadline(false);
         }
 
         /// <inheritdoc />
         public void SetState(IGroupState state)
         {
             _logger.LogInformation("Group {GroupId} switching from {FromStateType} to {ToStateType}.", GroupId.ToString(), _state.Type, state.Type);
-            this._state = state;
+            _state = state;
+
+            if (state.Type != GroupStateType.Waiting)
+            {
+                GroupWaitDeadline = null;
+            }
         }
 
         /// <inheritdoc />
@@ -389,9 +437,9 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             IEnumerable<Task> GetTasks()
             {
-                foreach (var session in FilterSessions(from, type))
+                foreach (var sessionId in FilterSessions(from.Id, type))
                 {
-                    yield return _sessionManager.SendSyncPlayGroupUpdate(session, message, cancellationToken);
+                    yield return _sessionManager.SendSyncPlayGroupUpdate(sessionId, message, cancellationToken);
                 }
             }
 
@@ -403,9 +451,9 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             IEnumerable<Task> GetTasks()
             {
-                foreach (var session in FilterSessions(from, type))
+                foreach (var sessionId in FilterSessions(from.Id, type))
                 {
-                    yield return _sessionManager.SendSyncPlayCommand(session, message, cancellationToken);
+                    yield return _sessionManager.SendSyncPlayCommand(sessionId, message, cancellationToken);
                 }
             }
 
@@ -425,12 +473,6 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <inheritdoc />
-        public GroupUpdate<T> NewSyncPlayGroupUpdate<T>(GroupUpdateType type, T data)
-        {
-            return new GroupUpdate<T>(GroupId, type, data);
-        }
-
-        /// <inheritdoc />
         public long SanitizePositionTicks(long? positionTicks)
         {
             var ticks = positionTicks ?? 0;
@@ -442,7 +484,7 @@ namespace Emby.Server.Implementations.SyncPlay
         {
             if (_participants.TryGetValue(session.Id, out GroupMember value))
             {
-                value.Ping = ping;
+                value.Ping = Math.Clamp(ping, 0, MaxPing);
             }
         }
 
@@ -455,7 +497,9 @@ namespace Emby.Server.Implementations.SyncPlay
                 max = Math.Max(max, session.Ping);
             }
 
-            return max;
+            // A group with no participants has no ping to report. Returning long.MinValue would
+            // overflow the callers that scale this value into ticks, so fall back to the default.
+            return max == long.MinValue ? DefaultPing : max;
         }
 
         /// <inheritdoc />
@@ -465,6 +509,8 @@ namespace Emby.Server.Implementations.SyncPlay
             {
                 value.IsBuffering = isBuffering;
             }
+
+            UpdateGroupWaitDeadline(false);
         }
 
         /// <inheritdoc />
@@ -474,6 +520,9 @@ namespace Emby.Server.Implementations.SyncPlay
             {
                 session.IsBuffering = isBuffering;
             }
+
+            // Resetting the status of every session starts a new waiting period.
+            UpdateGroupWaitDeadline(isBuffering);
         }
 
         /// <inheritdoc />
@@ -537,13 +586,23 @@ namespace Emby.Server.Implementations.SyncPlay
         }
 
         /// <inheritdoc />
+        public void ClearPlayQueue(bool clearPlayingItem)
+        {
+            PlayQueue.ClearPlaylist(clearPlayingItem);
+            if (clearPlayingItem)
+            {
+                RestartCurrentItem();
+            }
+        }
+
+        /// <inheritdoc />
         public bool RemoveFromPlayQueue(IReadOnlyList<Guid> playlistItemIds)
         {
             var playingItemRemoved = PlayQueue.RemoveFromPlaylist(playlistItemIds);
             if (playingItemRemoved)
             {
                 var itemId = PlayQueue.GetPlayingItemId();
-                if (!itemId.Equals(Guid.Empty))
+                if (!itemId.IsEmpty())
                 {
                     var item = _libraryManager.GetItemById(itemId);
                     RunTimeTicks = item.RunTimeTicks ?? 0;
@@ -610,10 +669,8 @@ namespace Emby.Server.Implementations.SyncPlay
                 RestartCurrentItem();
                 return true;
             }
-            else
-            {
-                return false;
-            }
+
+            return false;
         }
 
         /// <inheritdoc />
@@ -627,10 +684,8 @@ namespace Emby.Server.Implementations.SyncPlay
                 RestartCurrentItem();
                 return true;
             }
-            else
-            {
-                return false;
-            }
+
+            return false;
         }
 
         /// <inheritdoc />
@@ -649,8 +704,9 @@ namespace Emby.Server.Implementations.SyncPlay
         public PlayQueueUpdate GetPlayQueueUpdate(PlayQueueUpdateReason reason)
         {
             var startPositionTicks = PositionTicks;
+            var isPlaying = _state.Type.Equals(GroupStateType.Playing);
 
-            if (_state.Type.Equals(GroupStateType.Playing))
+            if (isPlaying)
             {
                 var currentTime = DateTime.UtcNow;
                 var elapsedTime = currentTime - LastActivity;
@@ -669,8 +725,89 @@ namespace Emby.Server.Implementations.SyncPlay
                 PlayQueue.GetPlaylist(),
                 PlayQueue.PlayingItemIndex,
                 startPositionTicks,
+                isPlaying,
                 PlayQueue.ShuffleMode,
                 PlayQueue.RepeatMode);
+        }
+
+        /// <summary>
+        /// Stops waiting for the members that have not reported ready and lets the rest of the
+        /// group carry on. Does nothing until <see cref="GroupWaitDeadline"/> has passed.
+        /// </summary>
+        /// <param name="cancellationToken">The cancellation token.</param>
+        internal void HandleGroupWaitTimeout(CancellationToken cancellationToken)
+        {
+            var deadline = GroupWaitDeadline;
+            if (deadline is null || deadline > Environment.TickCount64)
+            {
+                return;
+            }
+
+            GroupWaitDeadline = null;
+
+            if (_state is not WaitingGroupState waitingState)
+            {
+                return;
+            }
+
+            var blockingSessions = _participantSessions
+                .Values
+                .Where(participant => _participants.TryGetValue(participant.Id, out var member)
+                    && member.IsBuffering
+                    && !member.IgnoreGroupWait)
+                .ToList();
+
+            if (blockingSessions.Count == 0)
+            {
+                return;
+            }
+
+            // The recovery below is broadcast to the whole group, so it does not matter which of
+            // the sessions that kept the group waiting is the one acting on the group's behalf.
+            var session = blockingSessions[0];
+
+            _logger.LogWarning(
+                "Group {GroupId} waited {Waited} ms for session(s) {SessionIds} to report ready, giving up.",
+                GroupId.ToString(),
+                GroupWaitTimeout + Environment.TickCount64 - deadline.Value,
+                string.Join(", ", blockingSessions.Select(participant => participant.Id)));
+
+            if (waitingState.ResumePlaying)
+            {
+                // An unpause request in the waiting state means "start now, ignoring the sessions
+                // that are not ready".
+                var unpauseRequest = new UnpauseGroupRequest();
+                waitingState.HandleRequest(unpauseRequest, this, GroupStateType.Waiting, session, cancellationToken);
+                return;
+            }
+
+            // The members have been paused for the whole waiting period, so the playback position
+            // stays where the wait started.
+            SetAllBuffering(false);
+            SetState(new PausedGroupState(_loggerFactory));
+
+            var command = NewSyncPlayCommand(SendCommandType.Pause);
+            SendCommand(session, SyncPlayBroadcastType.AllGroup, command, cancellationToken);
+
+            var stateUpdate = new GroupStateUpdate(GroupStateType.Paused, PlaybackRequestType.Pause);
+            var update = new SyncPlayStateUpdate(GroupId, stateUpdate);
+            SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
+        }
+
+        private void UpdateGroupWaitDeadline(bool startNewWaitingPeriod)
+        {
+            if (_state.Type != GroupStateType.Waiting || !IsBuffering())
+            {
+                GroupWaitDeadline = null;
+                return;
+            }
+
+            // A running deadline covers the waiting period as a whole, so the sessions that keep
+            // reporting buffering while they load must not push it back.
+            if (GroupWaitDeadline is null || startNewWaitingPeriod)
+            {
+                GroupWaitDeadline = Environment.TickCount64 + GroupWaitTimeout;
+            }
         }
     }
 }

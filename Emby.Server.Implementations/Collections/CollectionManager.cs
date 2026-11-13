@@ -1,17 +1,19 @@
-#nullable disable
-
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Collections;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Configuration;
 using MediaBrowser.Model.Entities;
@@ -31,6 +33,7 @@ namespace Emby.Server.Implementations.Collections
         private readonly ILibraryMonitor _iLibraryMonitor;
         private readonly ILogger<CollectionManager> _logger;
         private readonly IProviderManager _providerManager;
+        private readonly ILinkedChildrenService _linkedChildrenService;
         private readonly ILocalizationManager _localizationManager;
         private readonly IApplicationPaths _appPaths;
 
@@ -44,6 +47,7 @@ namespace Emby.Server.Implementations.Collections
         /// <param name="iLibraryMonitor">The library monitor.</param>
         /// <param name="loggerFactory">The logger factory.</param>
         /// <param name="providerManager">The provider manager.</param>
+        /// <param name="linkedChildrenService">The linked children service.</param>
         public CollectionManager(
             ILibraryManager libraryManager,
             IApplicationPaths appPaths,
@@ -51,25 +55,27 @@ namespace Emby.Server.Implementations.Collections
             IFileSystem fileSystem,
             ILibraryMonitor iLibraryMonitor,
             ILoggerFactory loggerFactory,
-            IProviderManager providerManager)
+            IProviderManager providerManager,
+            ILinkedChildrenService linkedChildrenService)
         {
             _libraryManager = libraryManager;
             _fileSystem = fileSystem;
             _iLibraryMonitor = iLibraryMonitor;
             _logger = loggerFactory.CreateLogger<CollectionManager>();
             _providerManager = providerManager;
+            _linkedChildrenService = linkedChildrenService;
             _localizationManager = localizationManager;
             _appPaths = appPaths;
         }
 
         /// <inheritdoc />
-        public event EventHandler<CollectionCreatedEventArgs> CollectionCreated;
+        public event EventHandler<CollectionCreatedEventArgs>? CollectionCreated;
 
         /// <inheritdoc />
-        public event EventHandler<CollectionModifiedEventArgs> ItemsAddedToCollection;
+        public event EventHandler<CollectionModifiedEventArgs>? ItemsAddedToCollection;
 
         /// <inheritdoc />
-        public event EventHandler<CollectionModifiedEventArgs> ItemsRemovedFromCollection;
+        public event EventHandler<CollectionModifiedEventArgs>? ItemsRemovedFromCollection;
 
         private IEnumerable<Folder> FindFolders(string path)
         {
@@ -80,14 +86,12 @@ namespace Emby.Server.Implementations.Collections
                 .Where(i => _fileSystem.AreEqual(path, i.Path) || _fileSystem.ContainsSubPath(i.Path, path));
         }
 
-        internal async Task<Folder> EnsureLibraryFolder(string path, bool createIfNeeded)
+        internal async Task<Folder?> EnsureLibraryFolder(string path, bool createIfNeeded)
         {
-            var existingFolders = FindFolders(path)
-                .ToList();
-
-            if (existingFolders.Count > 0)
+            var existingFolder = FindFolders(path).FirstOrDefault();
+            if (existingFolder is not null)
             {
-                return existingFolders[0];
+                return existingFolder;
             }
 
             if (!createIfNeeded)
@@ -99,16 +103,19 @@ namespace Emby.Server.Implementations.Collections
 
             var libraryOptions = new LibraryOptions
             {
-                PathInfos = new[] { new MediaPathInfo { Path = path } },
+                PathInfos = [new MediaPathInfo(path)],
                 EnableRealtimeMonitor = false,
                 SaveLocalMetadata = true
             };
 
-            var name = _localizationManager.GetLocalizedString("Collections");
+            // This names a library for the whole server, so ignore the requesting client's language.
+            var name = _localizationManager.GetServerLocalizedString("Collections");
 
-            await _libraryManager.AddVirtualFolder(name, CollectionTypeOptions.BoxSets, libraryOptions, true).ConfigureAwait(false);
+            await _libraryManager.AddVirtualFolder(name, CollectionTypeOptions.boxsets, libraryOptions, true).ConfigureAwait(false);
 
-            return FindFolders(path).First();
+            _libraryManager.RootFolder.Children = null;
+
+            return FindFolders(path).FirstOrDefault();
         }
 
         internal string GetCollectionsFolderPath()
@@ -116,16 +123,33 @@ namespace Emby.Server.Implementations.Collections
             return Path.Combine(_appPaths.DataPath, "collections");
         }
 
-        private Task<Folder> GetCollectionsFolder(bool createIfNeeded)
+        /// <inheritdoc />
+        public Task<Folder?> GetCollectionsFolder(bool createIfNeeded)
         {
             return EnsureLibraryFolder(GetCollectionsFolderPath(), createIfNeeded);
+        }
+
+        /// <inheritdoc />
+        public IEnumerable<BoxSet> GetCollectionsContainingItem(User user, Guid itemId)
+        {
+            ArgumentNullException.ThrowIfNull(user);
+
+            if (itemId.IsEmpty())
+            {
+                return Enumerable.Empty<BoxSet>();
+            }
+
+            return _linkedChildrenService
+                .GetManualLinkedParentIds(itemId, BaseItemKind.BoxSet)
+                .Select(parentId => _libraryManager.GetItemById<BoxSet>(parentId, user))
+                .OfType<BoxSet>();
         }
 
         private IEnumerable<BoxSet> GetCollections(User user)
         {
             var folder = GetCollectionsFolder(false).GetAwaiter().GetResult();
 
-            return folder == null
+            return folder is null
                 ? Enumerable.Empty<BoxSet>()
                 : folder.GetChildren(user, true).OfType<BoxSet>();
         }
@@ -142,9 +166,9 @@ namespace Emby.Server.Implementations.Collections
 
             var parentFolder = await GetCollectionsFolder(true).ConfigureAwait(false);
 
-            if (parentFolder == null)
+            if (parentFolder is null)
             {
-                throw new ArgumentException();
+                throw new InvalidOperationException("Unable to resolve the collections library folder, so the collection cannot be created.");
             }
 
             var path = Path.Combine(parentFolder.Path, folderName);
@@ -153,18 +177,18 @@ namespace Emby.Server.Implementations.Collections
 
             try
             {
-                Directory.CreateDirectory(path);
-
+                var info = Directory.CreateDirectory(path);
                 var collection = new BoxSet
                 {
                     Name = name,
                     Path = path,
                     IsLocked = options.IsLocked,
                     ProviderIds = options.ProviderIds,
-                    DateCreated = DateTime.UtcNow
+                    DateCreated = info.CreationTimeUtc,
+                    DateModified = info.LastWriteTimeUtc
                 };
 
-                parentFolder.AddChild(collection, CancellationToken.None);
+                parentFolder.AddChild(collection);
 
                 if (options.ItemIdList.Count > 0)
                 {
@@ -200,47 +224,50 @@ namespace Emby.Server.Implementations.Collections
         }
 
         /// <inheritdoc />
-        public Task AddToCollectionAsync(Guid collectionId, IEnumerable<Guid> ids)
-            => AddToCollectionAsync(collectionId, ids, true, new MetadataRefreshOptions(new DirectoryService(_fileSystem)));
+        public Task AddToCollectionAsync(Guid collectionId, IEnumerable<Guid> itemIds)
+            => AddToCollectionAsync(collectionId, itemIds, true, new MetadataRefreshOptions(new DirectoryService(_fileSystem)));
 
         private async Task AddToCollectionAsync(Guid collectionId, IEnumerable<Guid> ids, bool fireEvent, MetadataRefreshOptions refreshOptions)
         {
-            var collection = _libraryManager.GetItemById(collectionId) as BoxSet;
-            if (collection == null)
+            if (_libraryManager.GetItemById(collectionId) is not BoxSet collection)
             {
-                throw new ArgumentException("No collection exists with the supplied Id");
+                throw new ArgumentException("No collection exists with the supplied collectionId " + collectionId);
             }
 
-            var list = new List<LinkedChild>();
-            var itemList = new List<BaseItem>();
+            List<BaseItem>? itemList = null;
 
-            var linkedChildrenList = collection.GetLinkedChildren();
+            var linkedChildrenList = collection.GetLinkedChildren(DtoOptions.StoredColumnsOnly);
             var currentLinkedChildrenIds = linkedChildrenList.Select(i => i.Id).ToList();
 
             foreach (var id in ids)
             {
                 var item = _libraryManager.GetItemById(id);
 
-                if (item == null)
+                if (item is null)
                 {
-                    throw new ArgumentException("No item exists with the supplied Id");
+                    throw new ArgumentException("No item exists with the supplied Id " + id);
                 }
 
                 if (!currentLinkedChildrenIds.Contains(id))
                 {
-                    itemList.Add(item);
+                    (itemList ??= new()).Add(item);
 
-                    list.Add(LinkedChild.Create(item));
                     linkedChildrenList.Add(item);
                 }
             }
 
-            if (list.Count > 0)
+            if (itemList is not null)
             {
-                var newList = collection.LinkedChildren.ToList();
-                newList.AddRange(list);
-                collection.LinkedChildren = newList.ToArray();
+                var originalLen = collection.LinkedChildren.Length;
+                var newItemCount = itemList.Count;
+                LinkedChild[] newChildren = new LinkedChild[originalLen + newItemCount];
+                collection.LinkedChildren.CopyTo(newChildren, 0);
+                for (int i = 0; i < newItemCount; i++)
+                {
+                    newChildren[originalLen + i] = LinkedChild.Create(itemList[i]);
+                }
 
+                collection.LinkedChildren = newChildren;
                 collection.UpdateRatingToItems(linkedChildrenList);
 
                 await collection.UpdateToRepositoryAsync(ItemUpdateType.MetadataEdit, CancellationToken.None).ConfigureAwait(false);
@@ -258,9 +285,7 @@ namespace Emby.Server.Implementations.Collections
         /// <inheritdoc />
         public async Task RemoveFromCollectionAsync(Guid collectionId, IEnumerable<Guid> itemIds)
         {
-            var collection = _libraryManager.GetItemById(collectionId) as BoxSet;
-
-            if (collection == null)
+            if (_libraryManager.GetItemById(collectionId) is not BoxSet collection)
             {
                 throw new ArgumentException("No collection exists with the supplied Id");
             }
@@ -272,9 +297,9 @@ namespace Emby.Server.Implementations.Collections
             {
                 var childItem = _libraryManager.GetItemById(guidId);
 
-                var child = collection.LinkedChildren.FirstOrDefault(i => (i.ItemId.HasValue && i.ItemId.Value == guidId) || (childItem != null && string.Equals(childItem.Path, i.Path, StringComparison.OrdinalIgnoreCase)));
+                var child = collection.LinkedChildren.FirstOrDefault(i => i.ItemId.HasValue && i.ItemId.Value.Equals(guidId));
 
-                if (child == null)
+                if (child is null)
                 {
                     _logger.LogWarning("No collection title exists with the supplied Id");
                     continue;
@@ -282,7 +307,7 @@ namespace Emby.Server.Implementations.Collections
 
                 list.Add(child);
 
-                if (childItem != null)
+                if (childItem is not null)
                 {
                     itemList.Add(childItem);
                 }
@@ -314,11 +339,7 @@ namespace Emby.Server.Implementations.Collections
 
             foreach (var item in items)
             {
-                if (item is not ISupportsBoxSetGrouping)
-                {
-                    results[item.Id] = item;
-                }
-                else
+                if (item is ISupportsBoxSetGrouping)
                 {
                     var itemId = item.Id;
 
@@ -342,10 +363,11 @@ namespace Emby.Server.Implementations.Collections
                     }
 
                     var alreadyInResults = false;
+
                     // this is kind of a performance hack because only Video has alternate versions that should be in a box set?
                     if (item is Video video)
                     {
-                        foreach (var childId in video.GetLocalAlternateVersionIds())
+                        foreach (var childId in _libraryManager.GetLocalAlternateVersionIds(video))
                         {
                             if (!results.ContainsKey(childId))
                             {
@@ -357,11 +379,13 @@ namespace Emby.Server.Implementations.Collections
                         }
                     }
 
-                    if (!alreadyInResults)
+                    if (alreadyInResults)
                     {
-                        results[itemId] = item;
+                        continue;
                     }
                 }
+
+                results[item.Id] = item;
             }
 
             return results.Values;

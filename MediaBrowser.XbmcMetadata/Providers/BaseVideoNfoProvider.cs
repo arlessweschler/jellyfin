@@ -54,11 +54,6 @@ namespace MediaBrowser.XbmcMetadata.Providers
             result.People = tmpItem.People;
             result.Images = tmpItem.Images;
             result.RemoteImages = tmpItem.RemoteImages;
-
-            if (tmpItem.UserDataList != null)
-            {
-                result.UserDataList = tmpItem.UserDataList;
-            }
         }
 
         /// <inheritdoc />
@@ -66,7 +61,7 @@ namespace MediaBrowser.XbmcMetadata.Providers
         {
             return MovieNfoSaver.GetMovieSavePaths(info)
                 .Select(directoryService.GetFile)
-                .FirstOrDefault(i => i != null);
+                .FirstOrDefault(i => i is not null);
         }
     }
 }

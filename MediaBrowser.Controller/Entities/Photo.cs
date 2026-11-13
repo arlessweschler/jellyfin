@@ -3,6 +3,7 @@
 #pragma warning disable CS1591
 
 using System.Text.Json.Serialization;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Model.Drawing;
 
 namespace MediaBrowser.Controller.Entities
@@ -13,7 +14,7 @@ namespace MediaBrowser.Controller.Entities
         public override bool SupportsLocalMetadata => false;
 
         [JsonIgnore]
-        public override string MediaType => Model.Entities.MediaType.Photo;
+        public override MediaType MediaType => MediaType.Photo;
 
         [JsonIgnore]
         public override Folder LatestItemsIndexContainer => AlbumEntity;
@@ -35,6 +36,30 @@ namespace MediaBrowser.Controller.Entities
                 return null;
             }
         }
+
+        public string CameraMake { get; set; }
+
+        public string CameraModel { get; set; }
+
+        public string Software { get; set; }
+
+        public double? ExposureTime { get; set; }
+
+        public double? FocalLength { get; set; }
+
+        public ImageOrientation? Orientation { get; set; }
+
+        public double? Aperture { get; set; }
+
+        public double? ShutterSpeed { get; set; }
+
+        public double? Latitude { get; set; }
+
+        public double? Longitude { get; set; }
+
+        public double? Altitude { get; set; }
+
+        public int? IsoSpeedRating { get; set; }
 
         public override bool CanDownload()
         {
@@ -69,29 +94,5 @@ namespace MediaBrowser.Controller.Entities
 
             return base.GetDefaultPrimaryImageAspectRatio();
         }
-
-        public string CameraMake { get; set; }
-
-        public string CameraModel { get; set; }
-
-        public string Software { get; set; }
-
-        public double? ExposureTime { get; set; }
-
-        public double? FocalLength { get; set; }
-
-        public ImageOrientation? Orientation { get; set; }
-
-        public double? Aperture { get; set; }
-
-        public double? ShutterSpeed { get; set; }
-
-        public double? Latitude { get; set; }
-
-        public double? Longitude { get; set; }
-
-        public double? Altitude { get; set; }
-
-        public int? IsoSpeedRating { get; set; }
     }
 }

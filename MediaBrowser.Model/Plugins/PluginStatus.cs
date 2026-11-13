@@ -29,12 +29,17 @@ namespace MediaBrowser.Model.Plugins
         NotSupported = -2,
 
         /// <summary>
-        /// This plugin caused an error when instantiated. (Either DI loop, or exception)
+        /// This plugin caused an error when instantiated (either DI loop, or exception).
         /// </summary>
         Malfunctioned = -3,
 
         /// <summary>
-        /// This plugin has been superceded by another version.
+        /// This plugin has been superseded by another version.
+        /// </summary>
+        Superseded = -4,
+
+        /// <summary>
+        /// [DEPRECATED] See Superseded.
         /// </summary>
         Superceded = -4,
 

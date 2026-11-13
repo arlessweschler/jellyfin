@@ -1,8 +1,6 @@
-#nullable disable
-
 using System;
 using System.Collections.Generic;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 
 namespace MediaBrowser.Controller
 {
@@ -50,7 +48,7 @@ namespace MediaBrowser.Controller
         /// <param name="itemId">The item id.</param>
         /// <param name="client">The client string.</param>
         /// <returns>The dictionary of custom item display preferences.</returns>
-        Dictionary<string, string> ListCustomItemDisplayPreferences(Guid userId, Guid itemId, string client);
+        Dictionary<string, string?> ListCustomItemDisplayPreferences(Guid userId, Guid itemId, string client);
 
         /// <summary>
         /// Sets the custom item display preference for the user and client.
@@ -59,11 +57,18 @@ namespace MediaBrowser.Controller
         /// <param name="itemId">The item id.</param>
         /// <param name="client">The client id.</param>
         /// <param name="customPreferences">A dictionary of custom item display preferences.</param>
-        void SetCustomItemDisplayPreferences(Guid userId, Guid itemId, string client, Dictionary<string, string> customPreferences);
+        void SetCustomItemDisplayPreferences(Guid userId, Guid itemId, string client, Dictionary<string, string?> customPreferences);
 
         /// <summary>
-        /// Saves changes made to the database.
+        /// Updates or Creates the display preferences.
         /// </summary>
-        void SaveChanges();
+        /// <param name="displayPreferences">The entity to update or create.</param>
+        void UpdateDisplayPreferences(DisplayPreferences displayPreferences);
+
+        /// <summary>
+        /// Updates or Creates the display preferences for the given item.
+        /// </summary>
+        /// <param name="itemDisplayPreferences">The entity to update or create.</param>
+        void UpdateItemDisplayPreferences(ItemDisplayPreferences itemDisplayPreferences);
     }
 }

@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Threading;
 using MediaBrowser.MediaEncoding.Subtitles;
 using MediaBrowser.Model.MediaInfo;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -13,35 +12,35 @@ namespace Jellyfin.MediaEncoding.Subtitles.Tests
 {
     public class SsaParserTests
     {
-        private readonly SsaParser _parser = new SsaParser(new NullLogger<AssParser>());
+        private readonly SubtitleEditParser _parser = new SubtitleEditParser(new NullLogger<SubtitleEditParser>());
 
         [Theory]
         [MemberData(nameof(Parse_MultipleDialogues_TestData))]
         public void Parse_MultipleDialogues_Success(string ssa, IReadOnlyList<SubtitleTrackEvent> expectedSubtitleTrackEvents)
         {
-            using (Stream stream = new MemoryStream(Encoding.UTF8.GetBytes(ssa)))
+            using Stream stream = new MemoryStream(Encoding.UTF8.GetBytes(ssa));
+
+            var subtitle = _parser.Parse(stream, "ssa");
+
+            Assert.Equal(expectedSubtitleTrackEvents.Count, subtitle.Paragraphs.Count);
+
+            for (int i = 0; i < expectedSubtitleTrackEvents.Count; ++i)
             {
-                SubtitleTrackInfo subtitleTrackInfo = _parser.Parse(stream, CancellationToken.None);
+                SubtitleTrackEvent expected = expectedSubtitleTrackEvents[i];
+                var actual = subtitle.Paragraphs[i];
 
-                Assert.Equal(expectedSubtitleTrackEvents.Count, subtitleTrackInfo.TrackEvents.Count);
-
-                for (int i = 0; i < expectedSubtitleTrackEvents.Count; ++i)
-                {
-                    SubtitleTrackEvent expected = expectedSubtitleTrackEvents[i];
-                    SubtitleTrackEvent actual = subtitleTrackInfo.TrackEvents[i];
-
-                    Assert.Equal(expected.Id, actual.Id);
-                    Assert.Equal(expected.Text, actual.Text);
-                    Assert.Equal(expected.StartPositionTicks, actual.StartPositionTicks);
-                    Assert.Equal(expected.EndPositionTicks, actual.EndPositionTicks);
-                }
+                Assert.Equal(expected.Id, actual.Number.ToString(CultureInfo.InvariantCulture));
+                Assert.Equal(expected.Text, actual.Text);
+                Assert.Equal(expected.StartPositionTicks, actual.StartTime.TimeSpan.Ticks);
+                Assert.Equal(expected.EndPositionTicks, actual.EndTime.TimeSpan.Ticks);
             }
         }
 
-        public static IEnumerable<object[]> Parse_MultipleDialogues_TestData()
+        public static TheoryData<string, IReadOnlyList<SubtitleTrackEvent>> Parse_MultipleDialogues_TestData()
         {
-            yield return new object[]
-            {
+            var data = new TheoryData<string, IReadOnlyList<SubtitleTrackEvent>>();
+
+            data.Add(
                 @"[Events]
                 Format: Layer, Start, End, Text
                 Dialogue: ,0:00:01.18,0:00:01.85,dialogue1
@@ -65,24 +64,24 @@ namespace Jellyfin.MediaEncoding.Subtitles.Tests
                         StartPositionTicks = 31800000,
                         EndPositionTicks = 38500000
                     }
-                }
-            };
+                });
+
+            return data;
         }
 
         [Fact]
         public void Parse_Valid_Success()
         {
-            using (var stream = File.OpenRead("Test Data/example.ssa"))
-            {
-                var parsed = _parser.Parse(stream, CancellationToken.None);
-                Assert.Single(parsed.TrackEvents);
-                var trackEvent = parsed.TrackEvents[0];
+            using var stream = File.OpenRead("Test Data/example.ssa");
 
-                Assert.Equal("1", trackEvent.Id);
-                Assert.Equal(TimeSpan.Parse("00:00:01.18", CultureInfo.InvariantCulture).Ticks, trackEvent.StartPositionTicks);
-                Assert.Equal(TimeSpan.Parse("00:00:06.85", CultureInfo.InvariantCulture).Ticks, trackEvent.EndPositionTicks);
-                Assert.Equal("{\\pos(400,570)}Like an angel with pity on nobody", trackEvent.Text);
-            }
+            var parsed = _parser.Parse(stream, "ssa");
+            Assert.Single(parsed.Paragraphs);
+            var paragraph = parsed.Paragraphs[0];
+
+            Assert.Equal(1, paragraph.Number);
+            Assert.Equal(TimeSpan.Parse("00:00:01.18", CultureInfo.InvariantCulture).Ticks, paragraph.StartTime.TimeSpan.Ticks);
+            Assert.Equal(TimeSpan.Parse("00:00:06.85", CultureInfo.InvariantCulture).Ticks, paragraph.EndTime.TimeSpan.Ticks);
+            Assert.Equal("{\\pos(400,570)}Like an angel with pity on nobody", paragraph.Text);
         }
     }
 }

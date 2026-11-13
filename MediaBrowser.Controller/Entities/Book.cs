@@ -10,19 +10,18 @@ using MediaBrowser.Controller.Providers;
 
 namespace MediaBrowser.Controller.Entities
 {
+    [Common.RequiresSourceSerialisation]
     public class Book : BaseItem, IHasLookupInfo<BookInfo>, IHasSeries
     {
-        public Book()
-        {
-            this.RunTimeTicks = TimeSpan.TicksPerSecond;
-        }
-
         [JsonIgnore]
-        public override string MediaType => Model.Entities.MediaType.Book;
+        public override MediaType MediaType => MediaType.Book;
 
         public override bool SupportsPlayedStatus => true;
 
         public override bool SupportsPositionTicksResume => true;
+
+        [JsonIgnore]
+        public override bool SupportsPeople => true;
 
         [JsonIgnore]
         public string SeriesPresentationUniqueKey { get; set; }

@@ -3,92 +3,92 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Controller.Entities
 {
     public static class PeopleHelper
     {
-        public static void AddPerson(List<PersonInfo> people, PersonInfo person)
+        public static void AddPerson(ICollection<PersonInfo> people, PersonInfo person)
         {
-            if (person == null)
-            {
-                throw new ArgumentNullException(nameof(person));
-            }
+            ArgumentNullException.ThrowIfNull(person);
+            ArgumentException.ThrowIfNullOrEmpty(person.Name);
 
-            if (string.IsNullOrEmpty(person.Name))
-            {
-                throw new ArgumentException("The person's name was empty or null.", nameof(person));
-            }
+            person.Name = person.Name.Trim();
 
             // Normalize
             if (string.Equals(person.Role, PersonType.GuestStar, StringComparison.OrdinalIgnoreCase))
             {
-                person.Type = PersonType.GuestStar;
+                person.Type = PersonKind.GuestStar;
             }
             else if (string.Equals(person.Role, PersonType.Director, StringComparison.OrdinalIgnoreCase))
             {
-                person.Type = PersonType.Director;
+                person.Type = PersonKind.Director;
             }
             else if (string.Equals(person.Role, PersonType.Producer, StringComparison.OrdinalIgnoreCase))
             {
-                person.Type = PersonType.Producer;
+                person.Type = PersonKind.Producer;
             }
             else if (string.Equals(person.Role, PersonType.Writer, StringComparison.OrdinalIgnoreCase))
             {
-                person.Type = PersonType.Writer;
+                person.Type = PersonKind.Writer;
             }
 
-            // If the type is GuestStar and there's already an Actor entry, then update it to avoid dupes
-            if (string.Equals(person.Type, PersonType.GuestStar, StringComparison.OrdinalIgnoreCase))
-            {
-                var existing = people.FirstOrDefault(p => p.Name.Equals(person.Name, StringComparison.OrdinalIgnoreCase) && p.Type.Equals(PersonType.Actor, StringComparison.OrdinalIgnoreCase));
+            // Check for dupes based on the combination of Name, Type and Role.
+            var existing = people.FirstOrDefault(p => IsSameCredit(p, person)
+                && string.Equals(p.Role ?? string.Empty, person.Role ?? string.Empty, StringComparison.OrdinalIgnoreCase));
 
-                if (existing != null)
-                {
-                    existing.Type = PersonType.GuestStar;
-                    MergeExisting(existing, person);
-                    return;
-                }
-            }
-
-            if (string.Equals(person.Type, PersonType.Actor, StringComparison.OrdinalIgnoreCase))
+            if (existing is null)
             {
-                // If the actor already exists without a role and we have one, fill it in
-                var existing = people.FirstOrDefault(p => p.Name.Equals(person.Name, StringComparison.OrdinalIgnoreCase) && (p.Type.Equals(PersonType.Actor, StringComparison.OrdinalIgnoreCase) || p.Type.Equals(PersonType.GuestStar, StringComparison.OrdinalIgnoreCase)));
-                if (existing == null)
+                if (string.IsNullOrEmpty(person.Role))
                 {
-                    // Wasn't there - add it
-                    people.Add(person);
+                    existing = people.FirstOrDefault(p => IsSameCredit(p, person));
                 }
                 else
                 {
-                    // Was there, if no role and we have one - fill it in
-                    if (string.IsNullOrEmpty(existing.Role) && !string.IsNullOrEmpty(person.Role))
+                    // If the person already exists without a role and we have one, fill it in
+                    existing = people.FirstOrDefault(p => IsSameCredit(p, person) && string.IsNullOrEmpty(p.Role));
+                    if (existing is not null)
                     {
                         existing.Role = person.Role;
                     }
-
-                    MergeExisting(existing, person);
                 }
             }
-            else
+
+            if (existing is null)
             {
-                var existing = people.FirstOrDefault(p =>
-                            string.Equals(p.Name, person.Name, StringComparison.OrdinalIgnoreCase) &&
-                            string.Equals(p.Type, person.Type, StringComparison.OrdinalIgnoreCase));
-
-                // Check for dupes based on the combination of Name and Type
-                if (existing == null)
-                {
-                    people.Add(person);
-                }
-                else
-                {
-                    MergeExisting(existing, person);
-                }
+                people.Add(person);
+                return;
             }
+
+            // If the type is GuestStar and there's already an Actor entry, then promote it to avoid dupes
+            if (person.Type == PersonKind.GuestStar)
+            {
+                existing.Type = PersonKind.GuestStar;
+            }
+
+            MergeExisting(existing, person);
         }
+
+        private static bool IsSameCredit(PersonInfo existing, PersonInfo person)
+        {
+            if (!string.Equals(existing.Name, person.Name, StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
+            }
+
+            // Actor and GuestStar describe the same credit, a guest star is just a promoted actor.
+            if (IsCastKind(existing.Type) && IsCastKind(person.Type))
+            {
+                return true;
+            }
+
+            return existing.Type == person.Type;
+        }
+
+        private static bool IsCastKind(PersonKind kind)
+            => kind is PersonKind.Actor or PersonKind.GuestStar;
 
         private static void MergeExisting(PersonInfo existing, PersonInfo person)
         {

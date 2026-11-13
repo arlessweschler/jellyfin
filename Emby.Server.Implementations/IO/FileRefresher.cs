@@ -1,5 +1,3 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
@@ -14,15 +12,15 @@ using Microsoft.Extensions.Logging;
 
 namespace Emby.Server.Implementations.IO
 {
-    public class FileRefresher : IDisposable
+    public sealed class FileRefresher : IDisposable
     {
         private readonly ILogger _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly IServerConfigurationManager _configurationManager;
 
-        private readonly List<string> _affectedPaths = new List<string>();
-        private readonly object _timerLock = new object();
-        private Timer _timer;
+        private readonly List<string> _affectedPaths = new();
+        private readonly Lock _timerLock = new();
+        private Timer? _timer;
         private bool _disposed;
 
         public FileRefresher(string path, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, ILogger logger)
@@ -36,16 +34,13 @@ namespace Emby.Server.Implementations.IO
             AddPath(path);
         }
 
-        public event EventHandler<EventArgs> Completed;
+        public event EventHandler<EventArgs>? Completed;
 
         public string Path { get; private set; }
 
         private void AddAffectedPath(string path)
         {
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(path);
 
             if (!_affectedPaths.Contains(path, StringComparer.Ordinal))
             {
@@ -55,10 +50,7 @@ namespace Emby.Server.Implementations.IO
 
         public void AddPath(string path)
         {
-            if (string.IsNullOrEmpty(path))
-            {
-                throw new ArgumentNullException(nameof(path));
-            }
+            ArgumentException.ThrowIfNullOrEmpty(path);
 
             lock (_timerLock)
             {
@@ -82,7 +74,7 @@ namespace Emby.Server.Implementations.IO
                     return;
                 }
 
-                if (_timer == null)
+                if (_timer is null)
                 {
                     _timer = new Timer(OnTimerCallback, null, TimeSpan.FromSeconds(_configurationManager.Configuration.LibraryMonitorDelay), TimeSpan.FromMilliseconds(-1));
                 }
@@ -93,7 +85,7 @@ namespace Emby.Server.Implementations.IO
             }
         }
 
-        public void ResetPath(string path, string affectedFile)
+        public void ResetPath(string path, string? affectedFile)
         {
             lock (_timerLock)
             {
@@ -111,12 +103,17 @@ namespace Emby.Server.Implementations.IO
             RestartTimer();
         }
 
-        private void OnTimerCallback(object state)
+        private void OnTimerCallback(object? state)
         {
             List<string> paths;
 
             lock (_timerLock)
             {
+                if (_disposed)
+                {
+                    return;
+                }
+
                 paths = _affectedPaths.ToList();
             }
 
@@ -127,7 +124,7 @@ namespace Emby.Server.Implementations.IO
 
             try
             {
-                ProcessPathChanges(paths.ToList());
+                ProcessPathChanges(paths);
             }
             catch (Exception ex)
             {
@@ -138,11 +135,11 @@ namespace Emby.Server.Implementations.IO
         private void ProcessPathChanges(List<string> paths)
         {
             var itemsToRefresh = paths
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Select(GetAffectedBaseItem)
-                .Where(item => item != null)
-                .GroupBy(x => x.Id)
-                .Select(x => x.First());
+                .Distinct()
+                .Select(TryGetAffectedBaseItem)
+                .OfType<BaseItem>()
+                .DistinctBy(x => x.Id)
+                .ToList();
 
             foreach (var item in itemsToRefresh)
             {
@@ -157,17 +154,23 @@ namespace Emby.Server.Implementations.IO
                 {
                     item.ChangedExternally();
                 }
-                catch (IOException ex)
-                {
-                    // For now swallow and log.
-                    // Research item: If an IOException occurs, the item may be in a disconnected state (media unavailable)
-                    // Should we remove it from it's parent?
-                    _logger.LogError(ex, "Error refreshing {Name}", item.Name);
-                }
                 catch (Exception ex)
                 {
                     _logger.LogError(ex, "Error refreshing {Name}", item.Name);
                 }
+            }
+        }
+
+        private BaseItem? TryGetAffectedBaseItem(string path)
+        {
+            try
+            {
+                return GetAffectedBaseItem(path);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Error finding the item affected by changes to {Path}", path);
+                return null;
             }
         }
 
@@ -176,25 +179,25 @@ namespace Emby.Server.Implementations.IO
         /// </summary>
         /// <param name="path">The path.</param>
         /// <returns>BaseItem.</returns>
-        private BaseItem GetAffectedBaseItem(string path)
+        private BaseItem? GetAffectedBaseItem(string path)
         {
-            BaseItem item = null;
+            BaseItem? item = null;
 
-            while (item == null && !string.IsNullOrEmpty(path))
+            while (item is null && !string.IsNullOrEmpty(path))
             {
                 item = _libraryManager.FindByPath(path, null);
 
-                path = System.IO.Path.GetDirectoryName(path);
+                path = System.IO.Path.GetDirectoryName(path) ?? string.Empty;
             }
 
-            if (item != null)
+            if (item is not null)
             {
                 // If the item has been deleted find the first valid parent that still exists
                 while (!Directory.Exists(item.Path) && !File.Exists(item.Path))
                 {
                     item = item.GetOwner() ?? item.GetParent();
 
-                    if (item == null)
+                    if (item is null)
                     {
                         break;
                     }
@@ -208,7 +211,7 @@ namespace Emby.Server.Implementations.IO
         {
             lock (_timerLock)
             {
-                if (_timer != null)
+                if (_timer is not null)
                 {
                     _timer.Dispose();
                     _timer = null;
@@ -219,9 +222,13 @@ namespace Emby.Server.Implementations.IO
         /// <inheritdoc />
         public void Dispose()
         {
-            _disposed = true;
+            if (_disposed)
+            {
+                return;
+            }
+
             DisposeTimer();
-            GC.SuppressFinalize(this);
+            _disposed = true;
         }
     }
 }

@@ -1,75 +1,267 @@
-#pragma warning disable CS1591
-
 using System;
+using System.Buffers;
 using System.Collections.Generic;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Emby.Server.Implementations.Library.Validators;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations;
+using Jellyfin.Database.Implementations.Entities;
+using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
+using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Globalization;
+using MediaBrowser.Model.IO;
 using MediaBrowser.Model.Tasks;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
-namespace Emby.Server.Implementations.ScheduledTasks
+namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
+
+/// <summary>
+/// Class PeopleValidationTask.
+/// </summary>
+public class PeopleValidationTask : IScheduledTask, IConfigurableScheduledTask
 {
+    private readonly ILibraryManager _libraryManager;
+    private readonly ILocalizationManager _localization;
+    private readonly IDbContextFactory<JellyfinDbContext> _dbContextFactory;
+    private readonly IFileSystem _fileSystem;
+    private readonly ILogger<PeopleValidationTask> _logger;
+    private readonly ILogger<PeopleValidator> _validatorLogger;
+    private readonly IItemTypeLookup _itemTypeLookup;
+
     /// <summary>
-    /// Class PeopleValidationTask.
+    /// Initializes a new instance of the <see cref="PeopleValidationTask" /> class.
     /// </summary>
-    public class PeopleValidationTask : IScheduledTask
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    /// <param name="dbContextFactory">Instance of the <see cref="IDbContextFactory{TContext}"/> interface.</param>
+    /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger{PeopleValidationTask}"/> interface.</param>
+    /// <param name="validatorLogger">Instance of the <see cref="ILogger{PeopleValidator}"/> interface.</param>
+    /// <param name="itemTypeLookup">Instance of the <see cref="IItemTypeLookup"/> interface.</param>
+    public PeopleValidationTask(
+        ILibraryManager libraryManager,
+        ILocalizationManager localization,
+        IDbContextFactory<JellyfinDbContext> dbContextFactory,
+        IFileSystem fileSystem,
+        ILogger<PeopleValidationTask> logger,
+        ILogger<PeopleValidator> validatorLogger,
+        IItemTypeLookup itemTypeLookup)
     {
-        /// <summary>
-        /// The library manager.
-        /// </summary>
-        private readonly ILibraryManager _libraryManager;
-        private readonly ILocalizationManager _localization;
+        _libraryManager = libraryManager;
+        _localization = localization;
+        _dbContextFactory = dbContextFactory;
+        _fileSystem = fileSystem;
+        _logger = logger;
+        _validatorLogger = validatorLogger;
+        _itemTypeLookup = itemTypeLookup;
+    }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="PeopleValidationTask" /> class.
-        /// </summary>
-        /// <param name="libraryManager">The library manager.</param>
-        /// <param name="localization">The localization manager.</param>
-        public PeopleValidationTask(ILibraryManager libraryManager, ILocalizationManager localization)
+    /// <inheritdoc />
+    public string Name => _localization.GetLocalizedString("TaskRefreshPeople");
+
+    /// <inheritdoc />
+    public string Description => _localization.GetLocalizedString("TaskRefreshPeopleDescription");
+
+    /// <inheritdoc />
+    public string Category => _localization.GetLocalizedString("TasksLibraryCategory");
+
+    /// <inheritdoc />
+    public string Key => "RefreshPeople";
+
+    /// <inheritdoc />
+    public bool IsHidden => false;
+
+    /// <inheritdoc />
+    public bool IsEnabled => true;
+
+    /// <inheritdoc />
+    public bool IsLogged => true;
+
+    /// <summary>
+    /// Creates the triggers that define when the task will run.
+    /// </summary>
+    /// <returns>An <see cref="IEnumerable{TaskTriggerInfo}"/> containing the default trigger infos for this task.</returns>
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        yield return new TaskTriggerInfo
         {
-            _libraryManager = libraryManager;
-            _localization = localization;
+            Type = TaskTriggerInfoType.IntervalTrigger,
+            IntervalTicks = TimeSpan.FromDays(7).Ticks
+        };
+    }
+
+    /// <inheritdoc />
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        // People validation performs heavy database writes that contend with an active library scan.
+        // Defer it until the scan has finished; the task will run again on its next trigger.
+        if (_libraryManager.IsScanRunning)
+        {
+            _logger.LogInformation("Skipping people validation because a library scan is currently running.");
+            return;
         }
 
-        /// <summary>
-        /// Creates the triggers that define when the task will run.
-        /// </summary>
-        public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+        // Phase 1: Deduplicate and remove orphaned people (0-33%)
+        var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
         {
-            return new[]
+            IProgress<double> subProgress = new Progress<double>((val) => progress.Report(val / 3));
+            var dupQuery = context.Peoples
+                    .GroupBy(e => new { e.Name, e.PersonType })
+                    .Where(e => e.Count() > 1)
+                    .OrderBy(e => e.Key.Name)
+                    .ThenBy(e => e.Key.PersonType)
+                    .Select(e => e.Select(f => f.Id).ToArray());
+
+            var total = dupQuery.Count();
+
+            const int PartitionSize = 100;
+            var iterator = 0;
+            int itemCounter;
+            var buffer = ArrayPool<Guid[]>.Shared.Rent(PartitionSize)!;
+            try
             {
-                new TaskTriggerInfo
+                do
                 {
-                    Type = TaskTriggerInfo.TriggerInterval,
-                    IntervalTicks = TimeSpan.FromDays(7).Ticks
-                }
-            };
+                    itemCounter = 0;
+                    await foreach (var item in dupQuery
+                        .Take(PartitionSize)
+                        .AsAsyncEnumerable()
+                        .WithCancellation(cancellationToken)
+                        .ConfigureAwait(false))
+                    {
+                        buffer[itemCounter++] = item;
+                    }
+
+                    for (int i = 0; i < itemCounter; i++)
+                    {
+                        var item = buffer[i];
+                        var reference = item[0];
+                        var dups = item[1..];
+                        await context.PeopleBaseItemMap.WhereOneOrMany(dups, e => e.PeopleId)
+                            .ExecuteUpdateAsync(e => e.SetProperty(f => f.PeopleId, reference), cancellationToken)
+                            .ConfigureAwait(false);
+                        await context.Peoples.Where(e => dups.Contains(e.Id)).ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
+                        subProgress.Report(100f / total * ((iterator * PartitionSize) + i));
+                    }
+
+                    iterator++;
+                } while (itemCounter == PartitionSize && !cancellationToken.IsCancellationRequested);
+            }
+            finally
+            {
+                ArrayPool<Guid[]>.Shared.Return(buffer);
+            }
+
+            var peopleToDelete = await context.Peoples
+                .Where(p => !context.PeopleBaseItemMap.Any(m => m.PeopleId.Equals(p.Id)))
+                .ExecuteDeleteAsync(cancellationToken)
+                .ConfigureAwait(false);
+            _logger.LogInformation("Removed {Count} orphaned people.", peopleToDelete);
+
+            subProgress.Report(100);
         }
 
-        /// <summary>
-        /// Returns the task to be executed.
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
+        // Phase 2: Validate people (33-66%). Runs after orphaned PeopleBaseItemMap entries are
+        // cleaned up above, so dead people are removed in a single pass instead of requiring a second run.
+        IProgress<double> validateProgress = new Progress<double>((val) => progress.Report((val / 3) + 33));
+        await new PeopleValidator(_libraryManager, _validatorLogger)
+            .Run(validateProgress, cancellationToken)
+            .ConfigureAwait(false);
+
+        // Phase 3: Refresh images for people missing them (66-100%)
+        IProgress<double> refreshProgress = new Progress<double>((val) => progress.Report((val / 3) + 66));
+        await RefreshPeopleImagesAsync(refreshProgress, cancellationToken).ConfigureAwait(false);
+
+        progress.Report(100);
+    }
+
+    private async Task RefreshPeopleImagesAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var thirtyDaysAgo = DateTime.UtcNow.AddDays(-30);
+        var personTypeName = _itemTypeLookup.BaseItemKindNames[BaseItemKind.Person];
+
+        List<Guid> peopleIds;
+
+        var context = await _dbContextFactory.CreateDbContextAsync(cancellationToken).ConfigureAwait(false);
+        await using (context.ConfigureAwait(false))
         {
-            return _libraryManager.ValidatePeople(cancellationToken, progress);
+            // Read the candidates in one go rather than paging them. A refresh stamps the person and takes
+            // it out of this set, so a growing offset over a shrinking set walks past people it never visits.
+            peopleIds = await context.BaseItems
+                .AsNoTracking()
+                .Where(b => b.Type == personTypeName)
+                .Where(b => b.DateLastRefreshed == null || b.DateLastRefreshed < thirtyDaysAgo)
+                .Where(b =>
+                    !b.Images!.Any(i => i.ImageType == ImageInfoImageType.Primary) ||
+                    string.IsNullOrEmpty(b.Overview))
+                .OrderBy(b => b.Id)
+                .Select(b => b.Id)
+                .ToListAsync(cancellationToken)
+                .ConfigureAwait(false);
         }
 
-        public string Name => _localization.GetLocalizedString("TaskRefreshPeople");
+        _logger.LogDebug("Found {Count} people needing image/overview refresh", peopleIds.Count);
 
-        public string Description => _localization.GetLocalizedString("TaskRefreshPeopleDescription");
+        if (peopleIds.Count == 0)
+        {
+            progress.Report(100);
+            return;
+        }
 
-        public string Category => _localization.GetLocalizedString("TasksLibraryCategory");
+        var numComplete = 0;
+        var numRefreshed = 0;
 
-        public string Key => "RefreshPeople";
+        foreach (var personId in peopleIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
 
-        public bool IsHidden => false;
+            if (await RefreshPersonAsync(personId, cancellationToken).ConfigureAwait(false))
+            {
+                numRefreshed++;
+            }
 
-        public bool IsEnabled => true;
+            numComplete++;
+            progress.Report(100.0 * numComplete / peopleIds.Count);
+        }
 
-        public bool IsLogged => true;
+        _logger.LogInformation("Refreshed metadata for {Count} people missing images or overview", numRefreshed);
+    }
+
+    private async Task<bool> RefreshPersonAsync(Guid personId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (_libraryManager.GetItemById(personId) is not Person item)
+            {
+                return false;
+            }
+
+            var hasImage = item.HasImage(MediaBrowser.Model.Entities.ImageType.Primary);
+            var hasOverview = !string.IsNullOrEmpty(item.Overview);
+
+            var options = new MetadataRefreshOptions(new DirectoryService(_fileSystem))
+            {
+                ImageRefreshMode = hasImage ? MetadataRefreshMode.ValidationOnly : MetadataRefreshMode.FullRefresh,
+                MetadataRefreshMode = hasOverview ? MetadataRefreshMode.ValidationOnly : MetadataRefreshMode.FullRefresh
+            };
+
+            await item.RefreshMetadata(options, cancellationToken).ConfigureAwait(false);
+            return true;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error refreshing images for person {PersonId}", personId);
+            return false;
+        }
     }
 }

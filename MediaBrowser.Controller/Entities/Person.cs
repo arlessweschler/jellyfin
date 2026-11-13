@@ -5,7 +5,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using MediaBrowser.Controller.Extensions;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
 using MediaBrowser.Controller.Providers;
 using Microsoft.Extensions.Logging;
 
@@ -14,8 +15,29 @@ namespace MediaBrowser.Controller.Entities
     /// <summary>
     /// This is the full Person object that can be retrieved with all of it's data.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class Person : BaseItem, IItemByName, IHasLookupInfo<PersonLookupInfo>
     {
+        /// <summary>
+        /// Gets the folder containing the item.
+        /// If the item is a folder, it returns the folder itself.
+        /// </summary>
+        /// <value>The containing folder path.</value>
+        [JsonIgnore]
+        public override string ContainingFolderPath => Path;
+
+        /// <summary>
+        /// Gets a value indicating whether to enable alpha numeric sorting.
+        /// </summary>
+        [JsonIgnore]
+        public override bool EnableAlphaNumericSorting => false;
+
+        [JsonIgnore]
+        public override bool SupportsPeople => false;
+
+        [JsonIgnore]
+        public override bool SupportsAncestors => false;
+
         public override List<string> GetUserDataKeys()
         {
             var list = base.GetUserDataKeys();
@@ -42,42 +64,32 @@ namespace MediaBrowser.Controller.Entities
             return value;
         }
 
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.PersonIds = new[] { Id };
 
             return LibraryManager.GetItemList(query);
         }
 
-        /// <summary>
-        /// Gets the folder containing the item.
-        /// If the item is a folder, it returns the folder itself.
-        /// </summary>
-        /// <value>The containing folder path.</value>
-        [JsonIgnore]
-        public override string ContainingFolderPath => Path;
-
         public override bool CanDelete()
         {
             return false;
+        }
+
+        /// <inheritdoc />
+        /// <remarks>
+        /// People don't carry the tags of the media they appear in, so the allowed tags check
+        /// is skipped for them; otherwise no person would be visible to users with allowed tags configured.
+        /// </remarks>
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
+        {
+            return base.IsVisible(user, true);
         }
 
         public override bool IsSaveLocalMetadataEnabled()
         {
             return true;
         }
-
-        /// <summary>
-        /// Gets a value indicating whether to enable alpha numeric sorting.
-        /// </summary>
-        [JsonIgnore]
-        public override bool EnableAlphaNumericSorting => false;
-
-        [JsonIgnore]
-        public override bool SupportsPeople => false;
-
-        [JsonIgnore]
-        public override bool SupportsAncestors => false;
 
         public static string GetPath(string name)
         {
@@ -86,10 +98,7 @@ namespace MediaBrowser.Controller.Entities
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validFilename = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validFilename = normalizeName ? GetItemByNameFolderName(name) : name;
 
             string subFolderPrefix = null;
 
@@ -129,6 +138,8 @@ namespace MediaBrowser.Controller.Entities
         /// <summary>
         /// This is called before any metadata refresh and returns true or false indicating if changes were made.
         /// </summary>
+        /// <param name="replaceAllMetadata"><c>true</c> to replace all metadata, <c>false</c> to not.</param>
+        /// <returns><c>true</c> if changes were made, <c>false</c> if not.</returns>
         public override bool BeforeMetadataRefresh(bool replaceAllMetadata)
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);

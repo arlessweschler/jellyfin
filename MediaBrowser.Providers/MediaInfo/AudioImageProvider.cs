@@ -1,4 +1,4 @@
-#pragma warning disable CS1591
+#pragma warning disable CA1826 // CA1826 Do not use Enumerable methods on Indexable collections.
 
 using System;
 using System.Collections.Generic;
@@ -11,7 +11,9 @@ using MediaBrowser.Common.Extensions;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.MediaEncoding;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
@@ -19,38 +21,49 @@ using MediaBrowser.Model.IO;
 namespace MediaBrowser.Providers.MediaInfo
 {
     /// <summary>
-    /// Uses ffmpeg to create video images.
+    /// Uses <see cref="IMediaEncoder"/> to extract embedded images.
     /// </summary>
     public class AudioImageProvider : IDynamicImageProvider
     {
+        private readonly IMediaSourceManager _mediaSourceManager;
         private readonly IMediaEncoder _mediaEncoder;
         private readonly IServerConfigurationManager _config;
         private readonly IFileSystem _fileSystem;
 
-        public AudioImageProvider(IMediaEncoder mediaEncoder, IServerConfigurationManager config, IFileSystem fileSystem)
+        /// <summary>
+        /// Initializes a new instance of the <see cref="AudioImageProvider"/> class.
+        /// </summary>
+        /// <param name="mediaSourceManager">The media source manager for fetching item streams.</param>
+        /// <param name="mediaEncoder">The media encoder for extracting embedded images.</param>
+        /// <param name="config">The server configuration manager for getting image paths.</param>
+        /// <param name="fileSystem">The filesystem.</param>
+        public AudioImageProvider(IMediaSourceManager mediaSourceManager, IMediaEncoder mediaEncoder, IServerConfigurationManager config, IFileSystem fileSystem)
         {
+            _mediaSourceManager = mediaSourceManager;
             _mediaEncoder = mediaEncoder;
             _config = config;
             _fileSystem = fileSystem;
         }
 
-        public string AudioImagesPath => Path.Combine(_config.ApplicationPaths.CachePath, "extracted-audio-images");
+        private string AudioImagesPath => Path.Combine(_config.ApplicationPaths.CachePath, "extracted-audio-images");
 
+        /// <inheritdoc />
         public string Name => "Image Extractor";
 
+        /// <inheritdoc />
         public IEnumerable<ImageType> GetSupportedImages(BaseItem item)
         {
-            return new List<ImageType> { ImageType.Primary };
+            return new[] { ImageType.Primary };
         }
 
+        /// <inheritdoc />
         public Task<DynamicImageResponse> GetImage(BaseItem item, ImageType type, CancellationToken cancellationToken)
         {
-            var audio = (Audio)item;
-
-            var imageStreams =
-                audio.GetMediaStreams(MediaStreamType.EmbeddedImage)
-                    .Where(i => i.Type == MediaStreamType.EmbeddedImage)
-                    .ToList();
+            var imageStreams = _mediaSourceManager.GetMediaStreams(new MediaStreamQuery
+            {
+                ItemId = item.Id,
+                Type = MediaStreamType.EmbeddedImage
+            });
 
             // Can't extract if we didn't find a video stream in the file
             if (imageStreams.Count == 0)
@@ -61,19 +74,18 @@ namespace MediaBrowser.Providers.MediaInfo
             return GetImage((Audio)item, imageStreams, cancellationToken);
         }
 
-        public async Task<DynamicImageResponse> GetImage(Audio item, List<MediaStream> imageStreams, CancellationToken cancellationToken)
+        private async Task<DynamicImageResponse> GetImage(Audio item, IReadOnlyList<MediaStream> imageStreams, CancellationToken cancellationToken)
         {
             var path = GetAudioImagePath(item);
 
             if (!File.Exists(path))
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(path));
-
-                var imageStream = imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).IndexOf("front", StringComparison.OrdinalIgnoreCase) != -1) ??
-                    imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).IndexOf("cover", StringComparison.OrdinalIgnoreCase) != -1) ??
+                var directoryName = Path.GetDirectoryName(path) ?? throw new InvalidOperationException($"Invalid path '{path}'");
+                Directory.CreateDirectory(directoryName);
+                var imageStream = imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).Contains("front", StringComparison.OrdinalIgnoreCase)) ??
+                    imageStreams.FirstOrDefault(i => (i.Comment ?? string.Empty).Contains("cover", StringComparison.OrdinalIgnoreCase)) ??
                     imageStreams.FirstOrDefault();
-
-                var imageStreamIndex = imageStream == null ? (int?)null : imageStream.Index;
+                var imageStreamIndex = imageStream?.Index;
 
                 var tempFile = await _mediaEncoder.ExtractAudioImage(item.Path, imageStreamIndex, cancellationToken).ConfigureAwait(false);
 
@@ -125,6 +137,7 @@ namespace MediaBrowser.Providers.MediaInfo
             return Path.Join(AudioImagesPath, prefix, filename);
         }
 
+        /// <inheritdoc />
         public bool Supports(BaseItem item)
         {
             if (item.IsShortcut)

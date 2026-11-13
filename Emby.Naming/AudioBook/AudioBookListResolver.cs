@@ -14,6 +14,7 @@ namespace Emby.Naming.AudioBook
     public class AudioBookListResolver
     {
         private readonly NamingOptions _options;
+        private readonly AudioBookResolver _audioBookResolver;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="AudioBookListResolver"/> class.
@@ -22,6 +23,7 @@ namespace Emby.Naming.AudioBook
         public AudioBookListResolver(NamingOptions options)
         {
             _options = options;
+            _audioBookResolver = new AudioBookResolver(_options);
         }
 
         /// <summary>
@@ -31,21 +33,17 @@ namespace Emby.Naming.AudioBook
         /// <returns>Returns IEnumerable of <see cref="AudioBookInfo"/>.</returns>
         public IEnumerable<AudioBookInfo> Resolve(IEnumerable<FileSystemMetadata> files)
         {
-            var audioBookResolver = new AudioBookResolver(_options);
-
             // File with empty fullname will be sorted out here.
             var audiobookFileInfos = files
-                .Select(i => audioBookResolver.Resolve(i.FullName))
-                .OfType<AudioBookFileInfo>()
-                .ToList();
+                .Select(i => _audioBookResolver.Resolve(i.FullName))
+                .OfType<AudioBookFileInfo>();
 
-            var stackResult = new StackResolver(_options)
-                .ResolveAudioBooks(audiobookFileInfos);
+            var stackResult = StackResolver.ResolveAudioBooks(audiobookFileInfos);
 
             foreach (var stack in stackResult)
             {
                 var stackFiles = stack.Files
-                    .Select(i => audioBookResolver.Resolve(i))
+                    .Select(i => _audioBookResolver.Resolve(i))
                     .OfType<AudioBookFileInfo>()
                     .ToList();
 
@@ -71,35 +69,35 @@ namespace Emby.Naming.AudioBook
             extras = new List<AudioBookFileInfo>();
             alternativeVersions = new List<AudioBookFileInfo>();
 
-            var haveChaptersOrPages = stackFiles.Any(x => x.ChapterNumber != null || x.PartNumber != null);
+            var haveChaptersOrPages = stackFiles.Any(x => x.ChapterNumber is not null || x.PartNumber is not null);
             var groupedBy = stackFiles.GroupBy(file => new { file.ChapterNumber, file.PartNumber });
             var nameWithReplacedDots = nameParserResult.Name.Replace(' ', '.');
 
             foreach (var group in groupedBy)
             {
-                if (group.Key.ChapterNumber == null && group.Key.PartNumber == null)
+                if (group.Key.ChapterNumber is null && group.Key.PartNumber is null)
                 {
                     if (group.Count() > 1 || haveChaptersOrPages)
                     {
-                        var ex = new List<AudioBookFileInfo>();
-                        var alt = new List<AudioBookFileInfo>();
+                        List<AudioBookFileInfo>? ex = null;
+                        List<AudioBookFileInfo>? alt = null;
 
                         foreach (var audioFile in group)
                         {
-                            var name = Path.GetFileNameWithoutExtension(audioFile.Path);
-                            if (name.Equals("audiobook") ||
-                                name.Contains(nameParserResult.Name, StringComparison.OrdinalIgnoreCase) ||
-                                name.Contains(nameWithReplacedDots, StringComparison.OrdinalIgnoreCase))
+                            var name = Path.GetFileNameWithoutExtension(audioFile.Path.AsSpan());
+                            if (name.Equals("audiobook", StringComparison.OrdinalIgnoreCase)
+                                || name.Contains(nameParserResult.Name, StringComparison.OrdinalIgnoreCase)
+                                || name.Contains(nameWithReplacedDots, StringComparison.OrdinalIgnoreCase))
                             {
-                                alt.Add(audioFile);
+                                (alt ??= new()).Add(audioFile);
                             }
                             else
                             {
-                                ex.Add(audioFile);
+                                (ex ??= new()).Add(audioFile);
                             }
                         }
 
-                        if (ex.Count > 0)
+                        if (ex is not null)
                         {
                             var extra = ex
                                 .OrderBy(x => x.Container)
@@ -110,7 +108,7 @@ namespace Emby.Naming.AudioBook
                             extras.AddRange(extra);
                         }
 
-                        if (alt.Count > 0)
+                        if (alt is not null)
                         {
                             var alternatives = alt
                                 .OrderBy(x => x.Container)

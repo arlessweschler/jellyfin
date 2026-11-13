@@ -1,7 +1,7 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Common.Updates;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Model.Activity;
@@ -35,14 +35,14 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.Updates
             await _activityManager.CreateAsync(new ActivityLog(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    _localizationManager.GetLocalizedString("NameInstallFailed"),
+                    _localizationManager.GetServerLocalizedString("NameInstallFailed"),
                     eventArgs.InstallationInfo.Name),
                 NotificationType.InstallationFailed.ToString(),
                 Guid.Empty)
             {
                 ShortOverview = string.Format(
                     CultureInfo.InvariantCulture,
-                    _localizationManager.GetLocalizedString("VersionNumber"),
+                    _localizationManager.GetServerLocalizedString("VersionNumber"),
                     eventArgs.InstallationInfo.Version),
                 Overview = eventArgs.Exception.Message
             }).ConfigureAwait(false);

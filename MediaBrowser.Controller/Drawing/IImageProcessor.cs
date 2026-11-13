@@ -1,15 +1,12 @@
-#nullable disable
-
 #pragma warning disable CS1591
-#nullable enable
 
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Model.Drawing;
+using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Controller.Drawing
@@ -54,6 +51,30 @@ namespace MediaBrowser.Controller.Drawing
         string GetImageBlurHash(string path);
 
         /// <summary>
+        /// Gets the blurhash of the image.
+        /// </summary>
+        /// <param name="path">Path to the image file.</param>
+        /// <param name="imageDimensions">The image dimensions.</param>
+        /// <returns>BlurHash.</returns>
+        string GetImageBlurHash(string path, ImageDimensions imageDimensions);
+
+        /// <summary>
+        /// Gets the image cache tag.
+        /// </summary>
+        /// <param name="baseItemPath">The items basePath.</param>
+        /// <param name="imageDateModified">The image last modification date.</param>
+        /// <returns>Guid.</returns>
+        string? GetImageCacheTag(string baseItemPath, DateTime imageDateModified);
+
+        /// <summary>
+        /// Gets the image cache tag.
+        /// </summary>
+        /// <param name="item">The item.</param>
+        /// <param name="image">The image.</param>
+        /// <returns>Guid.</returns>
+        string? GetImageCacheTag(BaseItemDto item, ChapterInfo image);
+
+        /// <summary>
         /// Gets the image cache tag.
         /// </summary>
         /// <param name="item">The item.</param>
@@ -61,7 +82,15 @@ namespace MediaBrowser.Controller.Drawing
         /// <returns>Guid.</returns>
         string GetImageCacheTag(BaseItem item, ItemImageInfo image);
 
-        string GetImageCacheTag(BaseItem item, ChapterInfo info);
+        /// <summary>
+        /// Gets the image cache tag.
+        /// </summary>
+        /// <param name="item">The item.</param>
+        /// <param name="image">The image.</param>
+        /// <returns>Guid.</returns>
+        string GetImageCacheTag(BaseItemDto item, ItemImageInfo image);
+
+        string? GetImageCacheTag(BaseItem item, ChapterInfo chapter);
 
         string? GetImageCacheTag(User user);
 
@@ -69,16 +98,8 @@ namespace MediaBrowser.Controller.Drawing
         /// Processes the image.
         /// </summary>
         /// <param name="options">The options.</param>
-        /// <param name="toStream">To stream.</param>
         /// <returns>Task.</returns>
-        Task ProcessImage(ImageProcessingOptions options, Stream toStream);
-
-        /// <summary>
-        /// Processes the image.
-        /// </summary>
-        /// <param name="options">The options.</param>
-        /// <returns>Task.</returns>
-        Task<(string path, string? mimeType, DateTime dateModified)> ProcessImage(ImageProcessingOptions options);
+        Task<(string Path, string? MimeType, DateTime DateModified)> ProcessImage(ImageProcessingOptions options);
 
         /// <summary>
         /// Gets the supported image output formats.
@@ -92,7 +113,5 @@ namespace MediaBrowser.Controller.Drawing
         /// <param name="options">The options.</param>
         /// <param name="libraryName">The library name to draw onto the collage.</param>
         void CreateImageCollage(ImageCollageOptions options, string? libraryName);
-
-        bool SupportsTransparency(string path);
     }
 }

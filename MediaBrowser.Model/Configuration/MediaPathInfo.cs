@@ -1,12 +1,20 @@
-#nullable disable
 #pragma warning disable CS1591
 
 namespace MediaBrowser.Model.Configuration
 {
     public class MediaPathInfo
     {
-        public string Path { get; set; }
+        public MediaPathInfo(string path)
+        {
+            Path = path;
+        }
 
-        public string NetworkPath { get; set; }
+        // Needed for xml serialization
+        public MediaPathInfo()
+        {
+            Path = string.Empty;
+        }
+
+        public string Path { get; set; }
     }
 }

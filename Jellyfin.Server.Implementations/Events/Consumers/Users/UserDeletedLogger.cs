@@ -1,8 +1,8 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
 using Jellyfin.Data.Events.Users;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Events;
 using MediaBrowser.Model.Activity;
 using MediaBrowser.Model.Globalization;
@@ -34,7 +34,7 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.Users
             await _activityManager.CreateAsync(new ActivityLog(
                     string.Format(
                         CultureInfo.InvariantCulture,
-                        _localizationManager.GetLocalizedString("UserDeletedWithName"),
+                        _localizationManager.GetServerLocalizedString("UserDeletedWithName"),
                         eventArgs.Argument.Username),
                     "UserDeleted",
                     Guid.Empty))

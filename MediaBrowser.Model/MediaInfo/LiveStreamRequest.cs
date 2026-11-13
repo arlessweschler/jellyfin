@@ -13,23 +13,8 @@ namespace MediaBrowser.Model.MediaInfo
         {
             EnableDirectPlay = true;
             EnableDirectStream = true;
+            AlwaysBurnInSubtitleWhenTranscoding = false;
             DirectPlayProtocols = new MediaProtocol[] { MediaProtocol.Http };
-        }
-
-        public LiveStreamRequest(AudioOptions options)
-        {
-            MaxStreamingBitrate = options.MaxBitrate;
-            ItemId = options.ItemId;
-            DeviceProfile = options.Profile;
-            MaxAudioChannels = options.MaxAudioChannels;
-
-            DirectPlayProtocols = new MediaProtocol[] { MediaProtocol.Http };
-
-            if (options is VideoOptions videoOptions)
-            {
-                AudioStreamIndex = videoOptions.AudioStreamIndex;
-                SubtitleStreamIndex = videoOptions.SubtitleStreamIndex;
-            }
         }
 
         public string OpenToken { get; set; }
@@ -55,6 +40,8 @@ namespace MediaBrowser.Model.MediaInfo
         public bool EnableDirectPlay { get; set; }
 
         public bool EnableDirectStream { get; set; }
+
+        public bool AlwaysBurnInSubtitleWhenTranscoding { get; set; }
 
         public IReadOnlyList<MediaProtocol> DirectPlayProtocols { get; set; }
     }

@@ -4,16 +4,15 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Jellyfin.Data.Enums;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Entities;
-using MediaBrowser.Model.IO;
-using MediaBrowser.Model.Providers;
+using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities.Movies
 {
@@ -22,27 +21,21 @@ namespace MediaBrowser.Controller.Entities.Movies
     /// </summary>
     public class Movie : Video, IHasSpecialFeatures, IHasTrailers, IHasLookupInfo<MovieInfo>, ISupportsBoxSetGrouping
     {
-        public Movie()
-        {
-            SpecialFeatureIds = Array.Empty<Guid>();
-            RemoteTrailers = Array.Empty<MediaUrl>();
-            LocalTrailerIds = Array.Empty<Guid>();
-            RemoteTrailerIds = Array.Empty<Guid>();
-        }
+        /// <inheritdoc />
+        [JsonIgnore]
+        public IReadOnlyList<Guid> SpecialFeatureIds => GetExtras()
+            .Where(extra => extra.ExtraType is not null && extra is Video)
+            .Select(extra => extra.Id)
+            .ToArray();
 
         /// <inheritdoc />
-        public IReadOnlyList<Guid> SpecialFeatureIds { get; set; }
-
-        /// <inheritdoc />
-        public IReadOnlyList<Guid> LocalTrailerIds { get; set; }
-
-        /// <inheritdoc />
-        public IReadOnlyList<Guid> RemoteTrailerIds { get; set; }
+        [JsonIgnore]
+        public IReadOnlyList<BaseItem> LocalTrailers => GetExtras([Model.Entities.ExtraType.Trailer]).ToArray();
 
         /// <summary>
-        /// Gets or sets the name of the TMDB collection.
+        /// Gets or sets the name of the TMDb collection.
         /// </summary>
-        /// <value>The name of the TMDB collection.</value>
+        /// <value>The name of the TMDb collection.</value>
         public string TmdbCollectionName { get; set; }
 
         [JsonIgnore]
@@ -51,9 +44,6 @@ namespace MediaBrowser.Controller.Entities.Movies
             get => TmdbCollectionName;
             set => TmdbCollectionName = value;
         }
-
-        [JsonIgnore]
-        public override bool StopRefreshIfLocalMetadataFound => false;
 
         public override double GetDefaultPrimaryImageAspectRatio()
         {
@@ -64,54 +54,6 @@ namespace MediaBrowser.Controller.Entities.Movies
             }
 
             return 2.0 / 3;
-        }
-
-        protected override async Task<bool> RefreshedOwnedItems(MetadataRefreshOptions options, List<FileSystemMetadata> fileSystemChildren, CancellationToken cancellationToken)
-        {
-            var hasChanges = await base.RefreshedOwnedItems(options, fileSystemChildren, cancellationToken).ConfigureAwait(false);
-
-            // Must have a parent to have special features
-            // In other words, it must be part of the Parent/Child tree
-            if (IsFileProtocol && SupportsOwnedItems && !IsInMixedFolder)
-            {
-                var specialFeaturesChanged = await RefreshSpecialFeatures(options, fileSystemChildren, cancellationToken).ConfigureAwait(false);
-
-                if (specialFeaturesChanged)
-                {
-                    hasChanges = true;
-                }
-            }
-
-            return hasChanges;
-        }
-
-        private async Task<bool> RefreshSpecialFeatures(MetadataRefreshOptions options, List<FileSystemMetadata> fileSystemChildren, CancellationToken cancellationToken)
-        {
-            var newItems = LibraryManager.FindExtras(this, fileSystemChildren, options.DirectoryService).ToList();
-            var newItemIds = newItems.Select(i => i.Id).ToArray();
-
-            var itemsChanged = !SpecialFeatureIds.SequenceEqual(newItemIds);
-
-            var ownerId = Id;
-
-            var tasks = newItems.Select(i =>
-            {
-                var subOptions = new MetadataRefreshOptions(options);
-
-                if (i.OwnerId != ownerId)
-                {
-                    i.OwnerId = ownerId;
-                    subOptions.ForceSave = true;
-                }
-
-                return RefreshMetadataForOwnedItem(i, false, subOptions, cancellationToken);
-            });
-
-            await Task.WhenAll(tasks).ConfigureAwait(false);
-
-            SpecialFeatureIds = newItemIds;
-
-            return itemsChanged;
         }
 
         /// <inheritdoc />
@@ -148,7 +90,7 @@ namespace MediaBrowser.Controller.Entities.Movies
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);
 
-            if (!ProductionYear.HasValue)
+            if (ProductionYear is null)
             {
                 var info = LibraryManager.ParseName(Name);
 
@@ -178,24 +120,6 @@ namespace MediaBrowser.Controller.Entities.Movies
             }
 
             return hasChanges;
-        }
-
-        /// <inheritdoc />
-        public override List<ExternalUrl> GetRelatedUrls()
-        {
-            var list = base.GetRelatedUrls();
-
-            var imdbId = this.GetProviderId(MetadataProvider.Imdb);
-            if (!string.IsNullOrEmpty(imdbId))
-            {
-                list.Add(new ExternalUrl
-                {
-                    Name = "Trakt",
-                    Url = string.Format(CultureInfo.InvariantCulture, "https://trakt.tv/movies/{0}", imdbId)
-                });
-            }
-
-            return list;
         }
     }
 }

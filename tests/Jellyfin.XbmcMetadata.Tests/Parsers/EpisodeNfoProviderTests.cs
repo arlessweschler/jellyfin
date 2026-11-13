@@ -1,6 +1,7 @@
-﻿using System;
+using System;
 using System.Linq;
 using System.Threading;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Common.Configuration;
 using MediaBrowser.Controller.Entities.TV;
 using MediaBrowser.Controller.Library;
@@ -14,8 +15,6 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 using Xunit;
 
-#pragma warning disable CA5369
-
 namespace Jellyfin.XbmcMetadata.Tests.Parsers
 {
     public class EpisodeNfoProviderTests
@@ -27,7 +26,7 @@ namespace Jellyfin.XbmcMetadata.Tests.Parsers
             var providerManager = new Mock<IProviderManager>();
 
             var imdbExternalId = new ImdbExternalId();
-            var externalIdInfo = new ExternalIdInfo(imdbExternalId.ProviderName, imdbExternalId.Key, imdbExternalId.Type, imdbExternalId.UrlFormatString);
+            var externalIdInfo = new ExternalIdInfo(imdbExternalId.ProviderName, imdbExternalId.Key, imdbExternalId.Type);
 
             providerManager.Setup(x => x.GetExternalIdInfos(It.IsAny<IHasProviderIds>()))
                 .Returns(new[] { externalIdInfo });
@@ -81,18 +80,18 @@ namespace Jellyfin.XbmcMetadata.Tests.Parsers
             Assert.Equal("1276153", item.ProviderIds[MetadataProvider.Tmdb.ToString()]);
 
             // Credits
-            var writers = result.People.Where(x => x.Type == PersonType.Writer).ToArray();
+            var writers = result.People.Where(x => x.Type == PersonKind.Writer).ToArray();
             Assert.Equal(2, writers.Length);
             Assert.Contains("Bryan Fuller", writers.Select(x => x.Name));
             Assert.Contains("Michael Green", writers.Select(x => x.Name));
 
-            // Direcotrs
-            var directors = result.People.Where(x => x.Type == PersonType.Director).ToArray();
+            // Directors
+            var directors = result.People.Where(x => x.Type == PersonKind.Director).ToArray();
             Assert.Single(directors);
             Assert.Contains("David Slade", directors.Select(x => x.Name));
 
             // Actors
-            var actors = result.People.Where(x => x.Type == PersonType.Actor).ToArray();
+            var actors = result.People.Where(x => x.Type == PersonKind.Actor).ToArray();
             Assert.Equal(11, actors.Length);
             // Only test one actor
             var shadow = actors.FirstOrDefault(x => x.Role.Equals("Shadow Moon", StringComparison.Ordinal));
@@ -115,13 +114,72 @@ namespace Jellyfin.XbmcMetadata.Tests.Parsers
             _parser.Fetch(result, "Test Data/Rising.nfo", CancellationToken.None);
 
             var item = result.Item;
-            Assert.Equal("Rising (1)", item.Name);
+            Assert.Equal("Rising (1) / Rising (2)", item.Name);
             Assert.Equal(1, item.IndexNumber);
             Assert.Equal(2, item.IndexNumberEnd);
             Assert.Equal(1, item.ParentIndexNumber);
+            Assert.Equal("A new Stargate team embarks on a dangerous mission to a distant galaxy, where they discover a mythical lost city -- and a deadly new enemy. / Sheppard tries to convince Weir to mount a rescue mission to free Colonel Sumner, Teyla, and the others captured by the Wraith.", item.Overview);
+            Assert.Equal(new DateTime(2004, 7, 16), item.PremiereDate);
+            Assert.Equal(2004, item.ProductionYear);
+        }
+
+        [Fact]
+        public void Fetch_Valid_MultiEpisode_Unordered_Success()
+        {
+            var result = new MetadataResult<Episode>()
+            {
+                Item = new Episode()
+            };
+
+            _parser.Fetch(result, "Test Data/Rising-Reversed.nfo", CancellationToken.None);
+
+            var item = result.Item;
+            // The episodedetails blocks are stored in descending order, the merged episode must still be in ascending order
+            Assert.Equal("Rising (1) / Rising (2)", item.Name);
+            Assert.Equal(1, item.IndexNumber);
+            Assert.Equal(2, item.IndexNumberEnd);
+            Assert.Equal(1, item.ParentIndexNumber);
+            Assert.Equal("A new Stargate team embarks on a dangerous mission to a distant galaxy, where they discover a mythical lost city -- and a deadly new enemy. / Sheppard tries to convince Weir to mount a rescue mission to free Colonel Sumner, Teyla, and the others captured by the Wraith.", item.Overview);
+            Assert.Equal(new DateTime(2004, 7, 16), item.PremiereDate);
+            Assert.Equal(2004, item.ProductionYear);
+        }
+
+        [Fact]
+        public void Fetch_Valid_MultiEpisode_With_Missing_Tags_Success()
+        {
+            var result = new MetadataResult<Episode>()
+            {
+                Item = new Episode()
+            };
+
+            _parser.Fetch(result, "Test Data/Stargate Atlantis S01E01-E04.nfo", CancellationToken.None);
+
+            var item = result.Item;
+            // <title> provided for episode 1, 3 and 4
+            Assert.Equal("Rising / Hide and Seek / Thirty-Eight Minutes", item.Name);
+            // <originaltitle> provided for all episodes
+            Assert.Equal("Rising (1) / Rising (2) / Hide and Seek / Thirty-Eight Minutes", item.OriginalTitle);
+            Assert.Equal(1, item.IndexNumber);
+            Assert.Equal(4, item.IndexNumberEnd);
+            Assert.Equal(1, item.ParentIndexNumber);
+            // <plot> only provided for episode 1
             Assert.Equal("A new Stargate team embarks on a dangerous mission to a distant galaxy, where they discover a mythical lost city -- and a deadly new enemy.", item.Overview);
             Assert.Equal(new DateTime(2004, 7, 16), item.PremiereDate);
             Assert.Equal(2004, item.ProductionYear);
+        }
+
+        [Fact]
+        public void Parse_GivenFileWithThumbWithoutAspect_Success()
+        {
+            var result = new MetadataResult<Episode>
+            {
+                Item = new Episode()
+            };
+
+            _parser.Fetch(result, "Test Data/Sonarr-Thumb.nfo", CancellationToken.None);
+
+            Assert.Single(result.RemoteImages, x => x.Type == ImageType.Primary);
+            Assert.Equal("https://artworks.thetvdb.com/banners/episodes/359095/7081317.jpg", result.RemoteImages.First(x => x.Type == ImageType.Primary).Url);
         }
 
         [Fact]

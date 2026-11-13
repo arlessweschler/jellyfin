@@ -1,5 +1,3 @@
-#nullable disable
-
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -17,22 +15,19 @@ namespace MediaBrowser.MediaEncoding.Probing
         /// <param name="result">The result.</param>
         public static void NormalizeFFProbeResult(InternalMediaInfoResult result)
         {
-            if (result == null)
-            {
-                throw new ArgumentNullException(nameof(result));
-            }
+            ArgumentNullException.ThrowIfNull(result);
 
-            if (result.Format != null && result.Format.Tags != null)
+            if (result.Format?.Tags is not null)
             {
                 result.Format.Tags = ConvertDictionaryToCaseInsensitive(result.Format.Tags);
             }
 
-            if (result.Streams != null)
+            if (result.Streams is not null)
             {
-                // Convert all dictionaries to case insensitive
+                // Convert all dictionaries to case-insensitive
                 foreach (var stream in result.Streams)
                 {
-                    if (stream.Tags != null)
+                    if (stream.Tags is not null)
                     {
                         stream.Tags = ConvertDictionaryToCaseInsensitive(stream.Tags);
                     }
@@ -41,38 +36,16 @@ namespace MediaBrowser.MediaEncoding.Probing
         }
 
         /// <summary>
-        /// Gets a string from an FFProbeResult tags dictionary.
-        /// </summary>
-        /// <param name="tags">The tags.</param>
-        /// <param name="key">The key.</param>
-        /// <returns>System.String.</returns>
-        public static string GetDictionaryValue(IReadOnlyDictionary<string, string> tags, string key)
-        {
-            if (tags == null)
-            {
-                return null;
-            }
-
-            tags.TryGetValue(key, out var val);
-            return val;
-        }
-
-        /// <summary>
         /// Gets an int from an FFProbeResult tags dictionary.
         /// </summary>
         /// <param name="tags">The tags.</param>
         /// <param name="key">The key.</param>
         /// <returns>System.Nullable{System.Int32}.</returns>
-        public static int? GetDictionaryNumericValue(Dictionary<string, string> tags, string key)
+        public static int? GetDictionaryNumericValue(IReadOnlyDictionary<string, string> tags, string key)
         {
-            var val = GetDictionaryValue(tags, key);
-
-            if (!string.IsNullOrEmpty(val))
+            if (tags.TryGetValue(key, out var val) && int.TryParse(val, out var i))
             {
-                if (int.TryParse(val, out var i))
-                {
-                    return i;
-                }
+                return i;
             }
 
             return null;
@@ -84,31 +57,32 @@ namespace MediaBrowser.MediaEncoding.Probing
         /// <param name="tags">The tags.</param>
         /// <param name="key">The key.</param>
         /// <returns>System.Nullable{DateTime}.</returns>
-        public static DateTime? GetDictionaryDateTime(Dictionary<string, string> tags, string key)
+        public static DateTime? GetDictionaryDateTime(IReadOnlyDictionary<string, string> tags, string key)
         {
-            var val = GetDictionaryValue(tags, key);
-
-            if (string.IsNullOrEmpty(val))
+            if (tags.TryGetValue(key, out var val)
+                && (DateTime.TryParse(val, DateTimeFormatInfo.CurrentInfo, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dateTime)
+                    || DateTime.TryParseExact(val, "yyyy", DateTimeFormatInfo.CurrentInfo, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out dateTime)))
             {
-                return null;
-            }
-
-            if (DateTime.TryParse(val, DateTimeFormatInfo.CurrentInfo, DateTimeStyles.AssumeUniversal, out var i))
-            {
-                return i.ToUniversalTime();
+                return dateTime;
             }
 
             return null;
         }
 
         /// <summary>
-        /// Converts a dictionary to case insensitive.
+        /// Converts a dictionary to case-insensitive.
         /// </summary>
         /// <param name="dict">The dict.</param>
         /// <returns>Dictionary{System.StringSystem.String}.</returns>
-        private static Dictionary<string, string> ConvertDictionaryToCaseInsensitive(IReadOnlyDictionary<string, string> dict)
+        private static Dictionary<string, string?> ConvertDictionaryToCaseInsensitive(IReadOnlyDictionary<string, string?> dict)
         {
-            return new Dictionary<string, string>(dict, StringComparer.OrdinalIgnoreCase);
+            var result = new Dictionary<string, string?>(dict.Count, StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, value) in dict)
+            {
+                result.TryAdd(key, value);
+            }
+
+            return result;
         }
     }
 }

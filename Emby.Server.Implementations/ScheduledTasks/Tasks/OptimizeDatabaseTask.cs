@@ -2,100 +2,95 @@ using System;
 using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Server.Implementations;
+using Jellyfin.Database.Implementations;
+using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Globalization;
 using MediaBrowser.Model.Tasks;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
-namespace Emby.Server.Implementations.ScheduledTasks.Tasks
+namespace Emby.Server.Implementations.ScheduledTasks.Tasks;
+
+/// <summary>
+/// Optimizes Jellyfin's database by issuing VACUUM and ANALYZE commands.
+/// </summary>
+public class OptimizeDatabaseTask : IScheduledTask, IConfigurableScheduledTask
 {
+    private readonly ILogger<OptimizeDatabaseTask> _logger;
+    private readonly ILocalizationManager _localization;
+    private readonly IJellyfinDatabaseProvider _jellyfinDatabaseProvider;
+    private readonly ILibraryManager _libraryManager;
+
     /// <summary>
-    /// Optimizes Jellyfin's database by issuing a VACUUM command.
+    /// Initializes a new instance of the <see cref="OptimizeDatabaseTask" /> class.
     /// </summary>
-    public class OptimizeDatabaseTask : IScheduledTask, IConfigurableScheduledTask
+    /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
+    /// <param name="localization">Instance of the <see cref="ILocalizationManager"/> interface.</param>
+    /// <param name="jellyfinDatabaseProvider">Instance of the JellyfinDatabaseProvider that can be used for provider specific operations.</param>
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    public OptimizeDatabaseTask(
+        ILogger<OptimizeDatabaseTask> logger,
+        ILocalizationManager localization,
+        IJellyfinDatabaseProvider jellyfinDatabaseProvider,
+        ILibraryManager libraryManager)
     {
-        private readonly ILogger<OptimizeDatabaseTask> _logger;
-        private readonly ILocalizationManager _localization;
-        private readonly JellyfinDbProvider _provider;
+        _logger = logger;
+        _localization = localization;
+        _jellyfinDatabaseProvider = jellyfinDatabaseProvider;
+        _libraryManager = libraryManager;
+    }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="OptimizeDatabaseTask" /> class.
-        /// </summary>
-        public OptimizeDatabaseTask(
-            ILogger<OptimizeDatabaseTask> logger,
-            ILocalizationManager localization,
-            JellyfinDbProvider provider)
+    /// <inheritdoc />
+    public string Name => _localization.GetLocalizedString("TaskOptimizeDatabase");
+
+    /// <inheritdoc />
+    public string Description => _localization.GetLocalizedString("TaskOptimizeDatabaseDescription");
+
+    /// <inheritdoc />
+    public string Category => _localization.GetLocalizedString("TasksMaintenanceCategory");
+
+    /// <inheritdoc />
+    public string Key => "OptimizeDatabaseTask";
+
+    /// <inheritdoc />
+    public bool IsHidden => false;
+
+    /// <inheritdoc />
+    public bool IsEnabled => true;
+
+    /// <inheritdoc />
+    public bool IsLogged => true;
+
+    /// <inheritdoc />
+    public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+    {
+        yield return new TaskTriggerInfo
         {
-            _logger = logger;
-            _localization = localization;
-            _provider = provider;
+            Type = TaskTriggerInfoType.IntervalTrigger,
+            IntervalTicks = TimeSpan.FromHours(6).Ticks
+        };
+    }
+
+    /// <inheritdoc />
+    public async Task ExecuteAsync(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        // Vacuuming/checkpointing requires an exclusive lock on the database. Running it while a library scan is in
+        // progress causes both operations to contend for the database and can stall the scan, so defer optimization
+        // until no scan is running. The task will run again on its next trigger.
+        if (_libraryManager.IsScanRunning)
+        {
+            _logger.LogInformation("Skipping database optimization because a library scan is currently running.");
+            return;
         }
 
-        /// <inheritdoc />
-        public string Name => _localization.GetLocalizedString("TaskOptimizeDatabase");
+        _logger.LogInformation("Vacuuming and analyzing jellyfin.db...");
 
-        /// <inheritdoc />
-        public string Description => _localization.GetLocalizedString("TaskOptimizeDatabaseDescription");
-
-        /// <inheritdoc />
-        public string Category => _localization.GetLocalizedString("TasksMaintenanceCategory");
-
-        /// <inheritdoc />
-        public string Key => "OptimizeDatabaseTask";
-
-        /// <inheritdoc />
-        public bool IsHidden => false;
-
-        /// <inheritdoc />
-        public bool IsEnabled => true;
-
-        /// <inheritdoc />
-        public bool IsLogged => true;
-
-        /// <summary>
-        /// Creates the triggers that define when the task will run.
-        /// </summary>
-        /// <returns>IEnumerable{BaseTaskTrigger}.</returns>
-        public IEnumerable<TaskTriggerInfo> GetDefaultTriggers()
+        try
         {
-            return new[]
-            {
-                // Every so often
-                new TaskTriggerInfo { Type = TaskTriggerInfo.TriggerInterval, IntervalTicks = TimeSpan.FromHours(24).Ticks }
-            };
+            await _jellyfinDatabaseProvider.RunScheduledOptimisation(cancellationToken).ConfigureAwait(false);
         }
-
-        /// <summary>
-        /// Returns the task to be executed.
-        /// </summary>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <param name="progress">The progress.</param>
-        /// <returns>Task.</returns>
-        public Task Execute(CancellationToken cancellationToken, IProgress<double> progress)
+        catch (Exception e)
         {
-            _logger.LogInformation("Optimizing and vacuuming jellyfin.db...");
-
-            try
-            {
-                using var context = _provider.CreateContext();
-                if (context.Database.IsSqlite())
-                {
-                    context.Database.ExecuteSqlRaw("PRAGMA optimize");
-                    context.Database.ExecuteSqlRaw("VACUUM");
-                    _logger.LogInformation("jellyfin.db optimized successfully!");
-                }
-                else
-                {
-                    _logger.LogInformation("This database doesn't support optimization");
-                }
-            }
-            catch (Exception e)
-            {
-                _logger.LogError(e, "Error while optimizing jellyfin.db");
-            }
-
-            return Task.CompletedTask;
+            _logger.LogError(e, "Error while optimizing jellyfin.db");
         }
     }
 }

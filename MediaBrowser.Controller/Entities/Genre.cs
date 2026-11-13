@@ -5,8 +5,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using MediaBrowser.Controller.Entities.Audio;
-using MediaBrowser.Controller.Extensions;
+using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities
@@ -14,6 +14,7 @@ namespace MediaBrowser.Controller.Entities
     /// <summary>
     /// Class Genre.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class Genre : BaseItem, IItemByName
     {
         /// <summary>
@@ -61,15 +62,15 @@ namespace MediaBrowser.Controller.Entities
             return false;
         }
 
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.GenreIds = new[] { Id };
             query.ExcludeItemTypes = new[]
             {
-                nameof(MusicVideo),
-                nameof(Entities.Audio.Audio),
-                nameof(MusicAlbum),
-                nameof(MusicArtist)
+                BaseItemKind.MusicVideo,
+                BaseItemKind.Audio,
+                BaseItemKind.MusicAlbum,
+                BaseItemKind.MusicArtist
             };
 
             return LibraryManager.GetItemList(query);
@@ -82,10 +83,7 @@ namespace MediaBrowser.Controller.Entities
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validName = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validName = normalizeName ? GetItemByNameFolderName(name) : name;
 
             return System.IO.Path.Combine(ConfigurationManager.ApplicationPaths.GenrePath, validName);
         }

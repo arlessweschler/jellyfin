@@ -1,32 +1,39 @@
-#pragma warning disable CS1591
-
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
+using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
+using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.IO;
 using MediaBrowser.Providers.Manager;
 using Microsoft.Extensions.Logging;
 
-namespace MediaBrowser.Providers.Folders
-{
-    public class CollectionFolderMetadataService : MetadataService<CollectionFolder, ItemLookupInfo>
-    {
-        public CollectionFolderMetadataService(
-            IServerConfigurationManager serverConfigurationManager,
-            ILogger<CollectionFolderMetadataService> logger,
-            IProviderManager providerManager,
-            IFileSystem fileSystem,
-            ILibraryManager libraryManager)
-            : base(serverConfigurationManager, logger, providerManager, fileSystem, libraryManager)
-        {
-        }
+namespace MediaBrowser.Providers.Folders;
 
-        /// <inheritdoc />
-        protected override void MergeData(MetadataResult<CollectionFolder> source, MetadataResult<CollectionFolder> target, MetadataField[] lockedFields, bool replaceData, bool mergeMetadataSettings)
-        {
-            ProviderUtils.MergeBaseItemData(source, target, lockedFields, replaceData, mergeMetadataSettings);
-        }
+/// <summary>
+/// Service to manage collection folder metadata.
+/// </summary>
+public class CollectionFolderMetadataService : MetadataService<CollectionFolder, ItemLookupInfo>
+{
+    /// <summary>
+    /// Initializes a new instance of the <see cref="CollectionFolderMetadataService"/> class.
+    /// </summary>
+    /// <param name="serverConfigurationManager">Instance of the <see cref="IServerConfigurationManager"/>.</param>
+    /// <param name="logger">Instance of the <see cref="ILogger"/> interface.</param>
+    /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
+    /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
+    /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
+    /// <param name="externalDataManager">Instance of the <see cref="IExternalDataManager"/> interface.</param>
+    /// <param name="itemRepository">Instance of the <see cref="IItemRepository"/> interface.</param>
+    public CollectionFolderMetadataService(
+        IServerConfigurationManager serverConfigurationManager,
+        ILogger<CollectionFolderMetadataService> logger,
+        IProviderManager providerManager,
+        IFileSystem fileSystem,
+        ILibraryManager libraryManager,
+        IExternalDataManager externalDataManager,
+        IItemRepository itemRepository)
+        : base(serverConfigurationManager, logger, providerManager, fileSystem, libraryManager, externalDataManager, itemRepository)
+    {
     }
 }

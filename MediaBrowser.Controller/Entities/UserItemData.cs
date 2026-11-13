@@ -1,5 +1,3 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
@@ -12,22 +10,18 @@ namespace MediaBrowser.Controller.Entities
     /// </summary>
     public class UserItemData
     {
-        /// <summary>
-        /// Gets or sets the user id.
-        /// </summary>
-        /// <value>The user id.</value>
-        public Guid UserId { get; set; }
-
-        /// <summary>
-        /// Gets or sets the key.
-        /// </summary>
-        /// <value>The key.</value>
-        public string Key { get; set; }
+        public const double MinLikeValue = 6.5;
 
         /// <summary>
         /// The _rating.
         /// </summary>
         private double? _rating;
+
+        /// <summary>
+        /// Gets or sets the key.
+        /// </summary>
+        /// <value>The key.</value>
+        public required string Key { get; set; }
 
         /// <summary>
         /// Gets or sets the users 0-10 rating.
@@ -93,8 +87,6 @@ namespace MediaBrowser.Controller.Entities
         /// <value>The index of the subtitle stream.</value>
         public int? SubtitleStreamIndex { get; set; }
 
-        public const double MinLikeValue = 6.5;
-
         /// <summary>
         /// Gets or sets a value indicating whether the item is liked or not.
         /// This should never be serialized.
@@ -105,7 +97,7 @@ namespace MediaBrowser.Controller.Entities
         {
             get
             {
-                if (Rating != null)
+                if (Rating is not null)
                 {
                     return Rating >= MinLikeValue;
                 }

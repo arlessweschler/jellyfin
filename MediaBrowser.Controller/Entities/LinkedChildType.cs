@@ -1,4 +1,4 @@
-﻿namespace MediaBrowser.Controller.Entities
+namespace MediaBrowser.Controller.Entities
 {
     /// <summary>
     /// The linked child type.
@@ -13,6 +13,16 @@
         /// <summary>
         /// Shortcut linked child.
         /// </summary>
-        Shortcut = 1
+        Shortcut = 1,
+
+        /// <summary>
+        /// Local alternate version (same item, different file path).
+        /// </summary>
+        LocalAlternateVersion = 2,
+
+        /// <summary>
+        /// Linked alternate version (different item ID).
+        /// </summary>
+        LinkedAlternateVersion = 3
     }
 }

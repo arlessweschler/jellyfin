@@ -1,5 +1,7 @@
 using System.IO;
+using System.Threading.Tasks;
 using System.Xml;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Configuration;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Library;
@@ -25,11 +27,9 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
         /// <param name="configurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
         /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
-        /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
-        /// <param name="userDataManager">Instance of the <see cref="IUserDataManager"/> interface.</param>
         /// <param name="logger">Instance of the <see cref="ILogger{PlaylistXmlSaver}"/> interface.</param>
-        public PlaylistXmlSaver(IFileSystem fileSystem, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, IUserManager userManager, IUserDataManager userDataManager, ILogger<PlaylistXmlSaver> logger)
-            : base(fileSystem, configurationManager, libraryManager, userManager, userDataManager, logger)
+        public PlaylistXmlSaver(IFileSystem fileSystem, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, ILogger<PlaylistXmlSaver> logger)
+            : base(fileSystem, configurationManager, libraryManager, logger)
         {
         }
 
@@ -45,14 +45,16 @@ namespace MediaBrowser.LocalMetadata.Savers
         }
 
         /// <inheritdoc />
-        protected override void WriteCustomElements(BaseItem item, XmlWriter writer)
+        protected override async Task WriteCustomElementsAsync(BaseItem item, XmlWriter writer)
         {
             var game = (Playlist)item;
 
-            if (!string.IsNullOrEmpty(game.PlaylistMediaType))
+            if (game.PlaylistMediaType == MediaType.Unknown)
             {
-                writer.WriteElementString("PlaylistMediaType", game.PlaylistMediaType);
+                return;
             }
+
+            await writer.WriteElementStringAsync(null, "PlaylistMediaType", null, game.PlaylistMediaType.ToString()).ConfigureAwait(false);
         }
 
         /// <inheritdoc />

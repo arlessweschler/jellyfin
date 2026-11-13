@@ -1,27 +1,27 @@
-#nullable disable
-
 #pragma warning disable CS1591
 
 using System;
+using System.Collections.Frozen;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions;
 using MediaBrowser.Common;
 using MediaBrowser.Controller.Channels;
+using MediaBrowser.Controller.Chapters;
 using MediaBrowser.Controller.Drawing;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.LiveTv;
-using MediaBrowser.Controller.Persistence;
 using MediaBrowser.Controller.Playlists;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Drawing;
+using MediaBrowser.Controller.Trickplay;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using MediaBrowser.Model.Querying;
@@ -39,89 +39,276 @@ namespace Emby.Server.Implementations.Dto
 {
     public class DtoService : IDtoService
     {
+        private static readonly FrozenDictionary<BaseItemKind, BaseItemKind[]> _relatedItemKinds = new Dictionary<BaseItemKind, BaseItemKind[]>
+        {
+            {
+                BaseItemKind.Genre, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.Episode,
+                    BaseItemKind.Movie,
+                    BaseItemKind.LiveTvProgram,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicArtist,
+                    BaseItemKind.MusicVideo,
+                    BaseItemKind.Series,
+                    BaseItemKind.Trailer
+                ]
+            },
+            {
+                BaseItemKind.MusicArtist, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicVideo
+                ]
+            },
+            {
+                BaseItemKind.MusicGenre, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicArtist,
+                    BaseItemKind.MusicVideo
+                ]
+            },
+            {
+                BaseItemKind.Person, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.AudioBook,
+                    BaseItemKind.Book,
+                    BaseItemKind.Episode,
+                    BaseItemKind.Movie,
+                    BaseItemKind.LiveTvProgram,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicArtist,
+                    BaseItemKind.MusicVideo,
+                    BaseItemKind.Series,
+                    BaseItemKind.Trailer
+                ]
+            },
+            {
+                BaseItemKind.Studio, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.Episode,
+                    BaseItemKind.Movie,
+                    BaseItemKind.LiveTvProgram,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicArtist,
+                    BaseItemKind.MusicVideo,
+                    BaseItemKind.Series,
+                    BaseItemKind.Trailer
+                ]
+            },
+            {
+                BaseItemKind.Year, [
+                    BaseItemKind.Audio,
+                    BaseItemKind.Episode,
+                    BaseItemKind.Movie,
+                    BaseItemKind.LiveTvProgram,
+                    BaseItemKind.MusicAlbum,
+                    BaseItemKind.MusicArtist,
+                    BaseItemKind.MusicVideo,
+                    BaseItemKind.Series,
+                    BaseItemKind.Trailer
+                ]
+            }
+        }.ToFrozenDictionary();
+
         private readonly ILogger<DtoService> _logger;
         private readonly ILibraryManager _libraryManager;
         private readonly IUserDataManager _userDataRepository;
-        private readonly IItemRepository _itemRepo;
 
         private readonly IImageProcessor _imageProcessor;
         private readonly IProviderManager _providerManager;
+        private readonly IRecordingsManager _recordingsManager;
 
         private readonly IApplicationHost _appHost;
         private readonly IMediaSourceManager _mediaSourceManager;
         private readonly Lazy<ILiveTvManager> _livetvManagerFactory;
 
-        private ILiveTvManager LivetvManager => _livetvManagerFactory.Value;
+        private readonly ITrickplayManager _trickplayManager;
+        private readonly IChapterManager _chapterManager;
 
         public DtoService(
             ILogger<DtoService> logger,
             ILibraryManager libraryManager,
             IUserDataManager userDataRepository,
-            IItemRepository itemRepo,
             IImageProcessor imageProcessor,
             IProviderManager providerManager,
+            IRecordingsManager recordingsManager,
             IApplicationHost appHost,
             IMediaSourceManager mediaSourceManager,
-            Lazy<ILiveTvManager> livetvManagerFactory)
+            Lazy<ILiveTvManager> livetvManagerFactory,
+            ITrickplayManager trickplayManager,
+            IChapterManager chapterManager)
         {
             _logger = logger;
             _libraryManager = libraryManager;
             _userDataRepository = userDataRepository;
-            _itemRepo = itemRepo;
             _imageProcessor = imageProcessor;
             _providerManager = providerManager;
+            _recordingsManager = recordingsManager;
             _appHost = appHost;
             _mediaSourceManager = mediaSourceManager;
             _livetvManagerFactory = livetvManagerFactory;
+            _trickplayManager = trickplayManager;
+            _chapterManager = chapterManager;
         }
 
-        /// <inheritdoc />
-        public IReadOnlyList<BaseItemDto> GetBaseItemDtos(IReadOnlyList<BaseItem> items, DtoOptions options, User user = null, BaseItem owner = null)
-        {
-            var returnItems = new BaseItemDto[items.Count];
-            var programTuples = new List<(BaseItem, BaseItemDto)>();
-            var channelTuples = new List<(BaseItemDto, LiveTvChannel)>();
+        private ILiveTvManager LivetvManager => _livetvManagerFactory.Value;
 
-            for (int index = 0; index < items.Count; index++)
+        /// <inheritdoc />
+        public IReadOnlyList<BaseItemDto> GetBaseItemDtos(
+            IReadOnlyList<BaseItem> items,
+            DtoOptions options,
+            User? user = null,
+            BaseItem? owner = null,
+            bool skipVisibilityCheck = false)
+        {
+            var accessibleItems = skipVisibilityCheck || user is null ? items : items.Where(x => x.IsVisible(user)).ToList();
+            var returnItems = new BaseItemDto[accessibleItems.Count];
+            List<(BaseItem, BaseItemDto)>? programTuples = null;
+            List<(BaseItemDto, LiveTvChannel)>? channelTuples = null;
+
+            // Batch-fetch user data for all items
+            Dictionary<Guid, UserItemData>? userDataBatch = null;
+            IReadOnlyDictionary<Guid, VersionResumeData>? resumeDataBatch = null;
+            if (user is not null && options.EnableUserData)
             {
-                var item = items[index];
-                var dto = GetBaseItemDtoInternal(item, options, user, owner);
+                userDataBatch = _userDataRepository.GetUserDataBatch(accessibleItems, user);
+
+                // For items with alternate versions, the most recently played version drives resume.
+                resumeDataBatch = _userDataRepository.GetResumeUserDataBatch(accessibleItems, user);
+            }
+
+            // Pre-compute collection folders once to avoid N+1 queries in CanDelete
+            List<Folder>? allCollectionFolders = null;
+            if (user is not null && options.ContainsField(ItemFields.CanDelete))
+            {
+                allCollectionFolders = _libraryManager.GetUserRootFolder().Children.OfType<Folder>().ToList();
+            }
+
+            // Batch-fetch by-name item counts to avoid N+1 queries
+            Dictionary<Guid, ItemCounts>? itemCountsBatch = null;
+            if (options.ContainsField(ItemFields.ItemCounts))
+            {
+                itemCountsBatch = GetItemCountsBatch(accessibleItems, user);
+            }
+
+            // Batch-fetch child counts for all folders to avoid N+1 queries.
+            Dictionary<Guid, int>? childCountBatch = null;
+            if (user is not null && options.ContainsField(ItemFields.ChildCount))
+            {
+                childCountBatch = GetChildCountBatch(accessibleItems, user);
+            }
+
+            // Batch-fetch played/total counts for all folders to avoid N+1 queries
+            Dictionary<Guid, (int Played, int Total)>? playedCountBatch = null;
+            if (user is not null && options.EnableUserData)
+            {
+                var folderIds = accessibleItems.OfType<Folder>()
+                    .Where(f => f.SupportsUserDataFromChildren && (f.SupportsPlayedStatus || options.ContainsField(ItemFields.RecursiveItemCount)))
+                    .Select(f => f.Id).ToList();
+                if (folderIds.Count > 0)
+                {
+                    playedCountBatch = _libraryManager.GetPlayedAndTotalCountBatch(folderIds, user);
+                }
+            }
+
+            // Batch-fetch MusicArtist lookups across all items to avoid N+1 queries.
+            IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null;
+            var artistNames = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in accessibleItems)
+            {
+                if (item is IHasArtist hasArtist)
+                {
+                    foreach (var name in hasArtist.Artists)
+                    {
+                        if (!string.IsNullOrWhiteSpace(name))
+                        {
+                            artistNames.Add(name);
+                        }
+                    }
+                }
+
+                if (item is IHasAlbumArtist hasAlbumArtist)
+                {
+                    foreach (var name in hasAlbumArtist.AlbumArtists)
+                    {
+                        if (!string.IsNullOrWhiteSpace(name))
+                        {
+                            artistNames.Add(name);
+                        }
+                    }
+                }
+            }
+
+            if (artistNames.Count > 0)
+            {
+                artistsBatch = _libraryManager.GetArtists(artistNames.ToArray());
+            }
+
+            // Batch-fetch people across all items to avoid one GetPeople query per item.
+            IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null;
+            if (options.ContainsField(ItemFields.People))
+            {
+                var peopleItemIds = accessibleItems.Where(i => i.SupportsPeople).Select(i => i.Id).ToList();
+                if (peopleItemIds.Count > 0)
+                {
+                    peopleBatch = _libraryManager.GetPeopleByItems(peopleItemIds);
+                }
+            }
+
+            // Batch-detect which videos own alternate versions to avoid the per-item alternate-version
+            // queries in MediaSourceCount. Videos absent from this set have a single media source.
+            IReadOnlySet<Guid>? alternateVersionItemIds = null;
+            if (options.ContainsField(ItemFields.MediaSourceCount))
+            {
+                var versionItemIds = accessibleItems.OfType<Video>().Select(i => i.Id).ToList();
+                if (versionItemIds.Count > 0)
+                {
+                    alternateVersionItemIds = _libraryManager.GetItemIdsWithAlternateVersions(versionItemIds);
+                }
+            }
+
+            for (int index = 0; index < accessibleItems.Count; index++)
+            {
+                var item = accessibleItems[index];
+                var dto = GetBaseItemDtoInternal(
+                    item,
+                    options,
+                    user,
+                    owner,
+                    userDataBatch?.GetValueOrDefault(item.Id),
+                    allCollectionFolders,
+                    childCountBatch,
+                    playedCountBatch,
+                    artistsBatch,
+                    resumeDataBatch?.GetValueOrDefault(item.Id),
+                    peopleBatch,
+                    alternateVersionItemIds);
 
                 if (item is LiveTvChannel tvChannel)
                 {
-                    channelTuples.Add((dto, tvChannel));
+                    (channelTuples ??= []).Add((dto, tvChannel));
                 }
                 else if (item is LiveTvProgram)
                 {
-                    programTuples.Add((item, dto));
+                    (programTuples ??= []).Add((item, dto));
                 }
 
-                if (item is IItemByName byName)
+                if (options.ContainsField(ItemFields.ItemCounts))
                 {
-                    if (options.ContainsField(ItemFields.ItemCounts))
-                    {
-                        var libraryItems = byName.GetTaggedItems(new InternalItemsQuery(user)
-                        {
-                            Recursive = true,
-                            DtoOptions = new DtoOptions(false)
-                            {
-                                EnableImages = false
-                            }
-                        });
-
-                        SetItemByNameInfo(item, dto, libraryItems, user);
-                    }
+                    SetItemByNameInfo(dto, user, itemCountsBatch);
                 }
 
                 returnItems[index] = dto;
             }
 
-            if (programTuples.Count > 0)
+            if (programTuples is not null)
             {
                 LivetvManager.AddInfoToProgramDto(programTuples, options.Fields, user).GetAwaiter().GetResult();
             }
 
-            if (channelTuples.Count > 0)
+            if (channelTuples is not null)
             {
                 LivetvManager.AddChannelInfo(channelTuples, options, user);
             }
@@ -129,51 +316,39 @@ namespace Emby.Server.Implementations.Dto
             return returnItems;
         }
 
-        public BaseItemDto GetBaseItemDto(BaseItem item, DtoOptions options, User user = null, BaseItem owner = null)
+        public BaseItemDto GetBaseItemDto(BaseItem item, DtoOptions options, User? user = null, BaseItem? owner = null)
         {
-            var dto = GetBaseItemDtoInternal(item, options, user, owner);
+            var dto = GetBaseItemDtoInternal(item, options, user, owner, null);
             if (item is LiveTvChannel tvChannel)
             {
-                var list = new List<(BaseItemDto, LiveTvChannel)>(1) { (dto, tvChannel) };
-                LivetvManager.AddChannelInfo(list, options, user);
+                LivetvManager.AddChannelInfo(new[] { (dto, tvChannel) }, options, user);
             }
             else if (item is LiveTvProgram)
             {
-                var list = new List<(BaseItem, BaseItemDto)>(1) { (item, dto) };
-                var task = LivetvManager.AddInfoToProgramDto(list, options.Fields, user);
-                Task.WaitAll(task);
+                LivetvManager.AddInfoToProgramDto(new[] { (item, dto) }, options.Fields, user).GetAwaiter().GetResult();
             }
 
-            if (item is IItemByName itemByName
-                && options.ContainsField(ItemFields.ItemCounts))
+            if (options.ContainsField(ItemFields.ItemCounts))
             {
-                SetItemByNameInfo(
-                    item,
-                    dto,
-                    GetTaggedItems(
-                        itemByName,
-                        user,
-                        new DtoOptions(false)
-                        {
-                            EnableImages = false
-                        }),
-                    user);
+                SetItemByNameInfo(dto, user);
             }
 
             return dto;
         }
 
-        private static IList<BaseItem> GetTaggedItems(IItemByName byName, User user, DtoOptions options)
-        {
-            return byName.GetTaggedItems(
-                new InternalItemsQuery(user)
-                {
-                    Recursive = true,
-                    DtoOptions = options
-                });
-        }
-
-        private BaseItemDto GetBaseItemDtoInternal(BaseItem item, DtoOptions options, User user = null, BaseItem owner = null)
+        private BaseItemDto GetBaseItemDtoInternal(
+            BaseItem item,
+            DtoOptions options,
+            User? user = null,
+            BaseItem? owner = null,
+            UserItemData? userData = null,
+            List<Folder>? allCollectionFolders = null,
+            Dictionary<Guid, int>? childCountBatch = null,
+            Dictionary<Guid, (int Played, int Total)>? playedCountBatch = null,
+            IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null,
+            VersionResumeData? resumeData = null,
+            IReadOnlyDictionary<Guid, IReadOnlyList<PersonInfo>>? peopleBatch = null,
+            IReadOnlySet<Guid>? alternateVersionItemIds = null)
         {
             var dto = new BaseItemDto
             {
@@ -187,7 +362,15 @@ namespace Emby.Server.Implementations.Dto
 
             if (options.ContainsField(ItemFields.People))
             {
-                AttachPeople(dto, item);
+                IReadOnlyList<PersonInfo>? prefetchedPeople = null;
+                if (peopleBatch is not null)
+                {
+                    // The batch omits items with no people, so a miss means "no people",
+                    // not "not fetched". Use an empty list to skip the per-item query.
+                    prefetchedPeople = peopleBatch.GetValueOrDefault(item.Id) ?? [];
+                }
+
+                AttachPeople(dto, item, user, prefetchedPeople);
             }
 
             if (options.ContainsField(ItemFields.PrimaryImageAspectRatio))
@@ -208,9 +391,17 @@ namespace Emby.Server.Implementations.Dto
                 dto.DisplayPreferencesId = item.DisplayPreferencesId.ToString("N", CultureInfo.InvariantCulture);
             }
 
-            if (user != null)
+            if (user is not null)
             {
-                AttachUserSpecificInfo(dto, item, user, options);
+                AttachUserSpecificInfo(
+                    dto,
+                    item,
+                    user,
+                    options,
+                    userData,
+                    childCountBatch,
+                    playedCountBatch,
+                    resumeData);
             }
 
             if (item is IHasMediaSources
@@ -226,18 +417,20 @@ namespace Emby.Server.Implementations.Dto
                 AttachStudios(dto, item);
             }
 
-            AttachBasicFields(dto, item, owner, options);
+            AttachBasicFields(dto, item, owner, options, artistsBatch, user, alternateVersionItemIds);
 
             if (options.ContainsField(ItemFields.CanDelete))
             {
-                dto.CanDelete = user == null
+                dto.CanDelete = user is null
                     ? item.CanDelete()
-                    : item.CanDelete(user);
+                    : allCollectionFolders is not null
+                        ? item.CanDelete(user, allCollectionFolders)
+                        : item.CanDelete(user);
             }
 
             if (options.ContainsField(ItemFields.CanDownload))
             {
-                dto.CanDownload = user == null
+                dto.CanDownload = user is null
                     ? item.CanDownload()
                     : item.CanDownload(user);
             }
@@ -247,9 +440,8 @@ namespace Emby.Server.Implementations.Dto
                 dto.Etag = item.GetEtag(user);
             }
 
-            var liveTvManager = LivetvManager;
-            var activeRecording = liveTvManager.GetActiveRecordingInfo(item.Path);
-            if (activeRecording != null)
+            var activeRecording = _recordingsManager.GetActiveRecordingInfo(item.Path);
+            if (activeRecording is not null)
             {
                 dto.Type = BaseItemKind.Recording;
                 dto.CanDownload = false;
@@ -261,7 +453,12 @@ namespace Emby.Server.Implementations.Dto
                     dto.Name = dto.SeriesName;
                 }
 
-                liveTvManager.AddInfoToRecordingDto(item, dto, activeRecording, user);
+                LivetvManager.AddInfoToRecordingDto(item, dto, activeRecording, user);
+            }
+
+            if (item is Audio audio)
+            {
+                dto.HasLyrics = audio.GetMediaStreams().Any(s => s.Type == MediaStreamType.Lyric);
             }
 
             return dto;
@@ -284,7 +481,7 @@ namespace Emby.Server.Implementations.Dto
                 }
 
                 var path = mediaSource.Path;
-                string fileExtensionContainer = null;
+                string? fileExtensionContainer = null;
 
                 if (!string.IsNullOrEmpty(path))
                 {
@@ -297,7 +494,7 @@ namespace Emby.Server.Implementations.Dto
                             path = path.TrimStart('.');
                         }
 
-                        if (!string.IsNullOrEmpty(path) && containers.Contains(path, StringComparer.OrdinalIgnoreCase))
+                        if (!string.IsNullOrEmpty(path) && containers.Contains(path, StringComparison.OrdinalIgnoreCase))
                         {
                             fileExtensionContainer = path;
                         }
@@ -308,19 +505,67 @@ namespace Emby.Server.Implementations.Dto
             }
         }
 
-        public BaseItemDto GetItemByNameDto(BaseItem item, DtoOptions options, List<BaseItem> taggedItems, User user = null)
+        /// <inheritdoc />
+        /// TODO refactor this to use the new SetItemByNameInfo.
+        /// Some callers already have the counts extracted so no reason to retrieve them again.
+        public BaseItemDto GetItemByNameDto(BaseItem item, DtoOptions options, List<BaseItem>? taggedItems, User? user = null)
         {
             var dto = GetBaseItemDtoInternal(item, options, user);
 
-            if (taggedItems != null && options.ContainsField(ItemFields.ItemCounts))
+            if (options.ContainsField(ItemFields.ItemCounts)
+                && taggedItems is not null
+                && taggedItems.Count != 0)
             {
-                SetItemByNameInfo(item, dto, taggedItems, user);
+                SetItemByNameInfo(item, dto, taggedItems);
             }
 
             return dto;
         }
 
-        private static void SetItemByNameInfo(BaseItem item, BaseItemDto dto, IList<BaseItem> taggedItems, User user = null)
+        private Dictionary<Guid, ItemCounts> GetItemCountsBatch(IReadOnlyList<BaseItem> items, User? user)
+        {
+            var result = new Dictionary<Guid, ItemCounts>();
+
+            foreach (var group in items.GroupBy(item => item.GetBaseItemKind()))
+            {
+                if (!_relatedItemKinds.TryGetValue(group.Key, out var relatedItemKinds))
+                {
+                    continue;
+                }
+
+                var ids = group.Select(item => item.Id).ToArray();
+                foreach (var (id, counts) in _libraryManager.GetItemCountsForNameItems(group.Key, ids, relatedItemKinds, user))
+                {
+                    result[id] = counts;
+                }
+            }
+
+            return result;
+        }
+
+        private void SetItemByNameInfo(BaseItemDto dto, User? user, IReadOnlyDictionary<Guid, ItemCounts>? prefetchedCounts = null)
+        {
+            if (!_relatedItemKinds.TryGetValue(dto.Type, out var relatedItemKinds))
+            {
+                return;
+            }
+
+            var counts = prefetchedCounts?.GetValueOrDefault(dto.Id)
+                ?? _libraryManager.GetItemCountsForNameItem(dto.Type, dto.Id, relatedItemKinds, user);
+
+            dto.AlbumCount = counts.AlbumCount;
+            dto.ArtistCount = counts.ArtistCount;
+            dto.EpisodeCount = counts.EpisodeCount;
+            dto.MovieCount = counts.MovieCount;
+            dto.MusicVideoCount = counts.MusicVideoCount;
+            dto.ProgramCount = counts.ProgramCount;
+            dto.SeriesCount = counts.SeriesCount;
+            dto.SongCount = counts.SongCount;
+            dto.TrailerCount = counts.TrailerCount;
+            dto.ChildCount = counts.TotalItemCount();
+        }
+
+        private static void SetItemByNameInfo(BaseItem item, BaseItemDto dto, IReadOnlyList<BaseItem> taggedItems)
         {
             if (item is MusicArtist)
             {
@@ -356,7 +601,15 @@ namespace Emby.Server.Implementations.Dto
         /// <summary>
         /// Attaches the user specific info.
         /// </summary>
-        private void AttachUserSpecificInfo(BaseItemDto dto, BaseItem item, User user, DtoOptions options)
+        private void AttachUserSpecificInfo(
+            BaseItemDto dto,
+            BaseItem item,
+            User user,
+            DtoOptions options,
+            UserItemData? userData = null,
+            Dictionary<Guid, int>? childCountBatch = null,
+            Dictionary<Guid, (int Played, int Total)>? playedCountBatch = null,
+            VersionResumeData? resumeData = null)
         {
             if (item.IsFolder)
             {
@@ -364,7 +617,19 @@ namespace Emby.Server.Implementations.Dto
 
                 if (options.EnableUserData)
                 {
-                    dto.UserData = _userDataRepository.GetUserDataDto(item, dto, user, options);
+                    if (userData is not null)
+                    {
+                        // Use pre-fetched user data
+                        dto.UserData = GetUserItemDataDto(userData, item.Id);
+                        (int Played, int Total)? precomputed = playedCountBatch is not null
+                            && playedCountBatch.TryGetValue(item.Id, out var counts) ? counts : null;
+                        item.FillUserDataDtoValues(dto.UserData, userData, dto, user, options, precomputed);
+                    }
+                    else
+                    {
+                        // Fall back to individual fetch
+                        dto.UserData = _userDataRepository.GetUserDataDto(item, dto, user, options);
+                    }
                 }
 
                 if (!dto.ChildCount.HasValue && item.SourceType == SourceType.Library)
@@ -372,12 +637,22 @@ namespace Emby.Server.Implementations.Dto
                     // For these types we can try to optimize and assume these values will be equal
                     if (item is MusicAlbum || item is Season || item is Playlist)
                     {
-                        dto.ChildCount = dto.RecursiveItemCount;
+                        if (dto.RecursiveItemCount > 0)
+                        {
+                            dto.ChildCount = dto.RecursiveItemCount;
+                        }
+
+                        var folderChildCount = folder.LinkedChildren.Length;
+                        // The default is an empty array, so we can't reliably use the count when it's empty
+                        if (folderChildCount > 0)
+                        {
+                            dto.ChildCount ??= folderChildCount;
+                        }
                     }
 
                     if (options.ContainsField(ItemFields.ChildCount))
                     {
-                        dto.ChildCount ??= GetChildCount(folder, user);
+                        dto.ChildCount ??= GetChildCount(folder, user, childCountBatch);
                     }
                 }
 
@@ -395,7 +670,20 @@ namespace Emby.Server.Implementations.Dto
             {
                 if (options.EnableUserData)
                 {
-                    dto.UserData = _userDataRepository.GetUserDataDto(item, user);
+                    if (userData is not null)
+                    {
+                        // Use pre-fetched user data
+                        dto.UserData = GetUserItemDataDto(userData, item.Id);
+                        item.FillUserDataDtoValues(dto.UserData, userData, dto, user, options);
+
+                        // For items with alternate versions, the most recently played version drives resume.
+                        resumeData?.ApplyTo(dto.UserData);
+                    }
+                    else
+                    {
+                        // Fall back to individual fetch
+                        dto.UserData = _userDataRepository.GetUserDataDto(item, user);
+                    }
                 }
             }
 
@@ -403,27 +691,122 @@ namespace Emby.Server.Implementations.Dto
             {
                 dto.PlayAccess = item.GetPlayAccess(user);
             }
-
-            if (options.ContainsField(ItemFields.BasicSyncInfo))
-            {
-                var userCanSync = user != null && user.HasPermission(PermissionKind.EnableContentDownloading);
-                if (userCanSync && item.SupportsExternalTransfer)
-                {
-                    dto.SupportsSync = true;
-                }
-            }
         }
 
-        private static int GetChildCount(Folder folder, User user)
+        private static UserItemDataDto GetUserItemDataDto(UserItemData data, Guid itemId)
         {
-            // Right now this is too slow to calculate for top level folders on a per-user basis
-            // Just return something so that apps that are expecting a value won't think the folders are empty
-            if (folder is ICollectionFolder || folder is UserView)
+            ArgumentNullException.ThrowIfNull(data);
+
+            return new UserItemDataDto
             {
-                return new Random().Next(1, 10);
+                IsFavorite = data.IsFavorite,
+                Likes = data.Likes,
+                PlaybackPositionTicks = data.PlaybackPositionTicks,
+                PlayCount = data.PlayCount,
+                Rating = data.Rating,
+                Played = data.Played,
+                LastPlayedDate = data.LastPlayedDate,
+                ItemId = itemId,
+                Key = data.Key
+            };
+        }
+
+        private Dictionary<Guid, int>? GetChildCountBatch(IReadOnlyList<BaseItem> items, User user)
+        {
+            Dictionary<Guid, IReadOnlyList<Guid>>? sources = null;
+            foreach (var folder in items.OfType<Folder>())
+            {
+                var sourceIds = GetChildCountSourceIds(folder, user);
+                if (sourceIds.Count > 0)
+                {
+                    (sources ??= new Dictionary<Guid, IReadOnlyList<Guid>>())[folder.Id] = sourceIds;
+                }
             }
 
-            return folder.GetChildCount(user);
+            if (sources is null)
+            {
+                return null;
+            }
+
+            var counts = _libraryManager.GetChildCountBatch(
+                sources.Values.SelectMany(ids => ids).Distinct().ToList(),
+                user);
+
+            var result = new Dictionary<Guid, int>(sources.Count);
+            foreach (var (folderId, sourceIds) in sources)
+            {
+                var total = 0;
+                foreach (var sourceId in sourceIds)
+                {
+                    total += counts.GetValueOrDefault(sourceId);
+                }
+
+                result[folderId] = total;
+            }
+
+            return result;
+        }
+
+        private IReadOnlyList<Guid> GetChildCountSourceIds(Folder folder, User user)
+        {
+            if (folder is CollectionFolder collectionFolder)
+            {
+                return collectionFolder.PhysicalFolderIds;
+            }
+
+            if (folder is not UserView view)
+            {
+                return [folder.Id];
+            }
+
+            // Only a view that stands for a library proxies it. The sub-views a movie or show view
+            // is built from hang off the same library but hold a query, not the library's children.
+            if (!UserView.EnableOriginalFolder(view.ViewType)
+                && view.ViewType is not (CollectionType.movies or CollectionType.tvshows))
+            {
+                return [];
+            }
+
+            // A view over a single library proxies that library, whatever the view type.
+            var parentId = view.DisplayParentId.IsEmpty() ? view.ParentId : view.DisplayParentId;
+            if (!parentId.IsEmpty()
+                && !parentId.Equals(view.Id)
+                && _libraryManager.GetItemById(parentId) is Folder parent
+                && parent is not UserView)
+            {
+                return GetChildCountSourceIds(parent, user);
+            }
+
+            // A grouped view has no single parent: it stands for every library the user grouped
+            // into it, the same set UserViewManager builds the view from.
+            if (view.ViewType is CollectionType.movies or CollectionType.tvshows)
+            {
+                return _libraryManager.GetUserRootFolder()
+                    .GetChildren(user, true)
+                    .OfType<CollectionFolder>()
+                    .Where(f => user.IsFolderGrouped(f.Id)
+                        && (f.CollectionType == view.ViewType || f.CollectionType is null))
+                    .SelectMany(f => f.PhysicalFolderIds)
+                    .Distinct()
+                    .ToList();
+            }
+
+            return [];
+        }
+
+        private int GetChildCount(Folder folder, User user, Dictionary<Guid, int>? childCountBatch)
+        {
+            // Use pre-fetched batch data if available
+            if (childCountBatch is not null && childCountBatch.TryGetValue(folder.Id, out var count))
+            {
+                return count;
+            }
+
+            // No batch covered this folder.
+            var single = GetChildCountBatch([folder], user);
+            return single is not null && single.TryGetValue(folder.Id, out var singleCount)
+                ? singleCount
+                : folder.GetChildCount(user);
         }
 
         private static void SetBookProperties(BaseItemDto dto, Book item)
@@ -449,16 +832,11 @@ namespace Emby.Server.Implementations.Dto
 
             var album = item.AlbumEntity;
 
-            if (album != null)
+            if (album is not null)
             {
                 dto.Album = album.Name;
                 dto.AlbumId = album.Id;
             }
-        }
-
-        private string GetDtoId(BaseItem item)
-        {
-            return item.Id.ToString("N", CultureInfo.InvariantCulture);
         }
 
         private void SetMusicVideoProperties(BaseItemDto dto, MusicVideo item)
@@ -467,7 +845,7 @@ namespace Emby.Server.Implementations.Dto
             {
                 var parentAlbumIds = _libraryManager.GetItemIds(new InternalItemsQuery
                 {
-                    IncludeItemTypes = new[] { nameof(MusicAlbum) },
+                    IncludeItemTypes = new[] { BaseItemKind.MusicAlbum },
                     Name = item.Album,
                     Limit = 1
                 });
@@ -485,11 +863,11 @@ namespace Emby.Server.Implementations.Dto
         {
             return images
                 .Select(p => GetImageCacheTag(item, p))
-                .Where(i => i != null)
-                .ToArray();
+                .Where(i => i is not null)
+                .ToArray()!; // null values got filtered out
         }
 
-        private string GetImageCacheTag(BaseItem item, ItemImageInfo image)
+        private string? GetImageCacheTag(BaseItem item, ItemImageInfo image)
         {
             try
             {
@@ -497,7 +875,7 @@ namespace Emby.Server.Implementations.Dto
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Error getting {imageType} image info for {path}", image.Type, image.Path);
+                _logger.LogError(ex, "Error getting {ImageType} image info for {Path}", image.Type, image.Path);
                 return null;
             }
         }
@@ -507,41 +885,47 @@ namespace Emby.Server.Implementations.Dto
         /// </summary>
         /// <param name="dto">The dto.</param>
         /// <param name="item">The item.</param>
-        /// <returns>Task.</returns>
-        private void AttachPeople(BaseItemDto dto, BaseItem item)
+        /// <param name="user">The requesting user.</param>
+        /// <param name="prefetchedPeople">People fetched in batch by the caller; when null the people are queried per item.</param>
+        private void AttachPeople(BaseItemDto dto, BaseItem item, User? user = null, IReadOnlyList<PersonInfo>? prefetchedPeople = null)
         {
+            // When rendering a page of items the caller batch-fetches people for every item up
+            // front and passes them in, avoiding one GetPeople query per item. Fall back to the
+            // per-item query for the single item path where no batch is available.
+            var source = prefetchedPeople ?? _libraryManager.GetPeople(item);
+
             // Ordering by person type to ensure actors and artists are at the front.
             // This is taking advantage of the fact that they both begin with A
             // This should be improved in the future
-            var people = _libraryManager.GetPeople(item).OrderBy(i => i.SortOrder ?? int.MaxValue)
+            var people = source.OrderBy(i => i.SortOrder ?? int.MaxValue)
                 .ThenBy(i =>
                 {
-                    if (i.IsType(PersonType.Actor))
+                    if (i.IsType(PersonKind.Actor))
                     {
                         return 0;
                     }
 
-                    if (i.IsType(PersonType.GuestStar))
+                    if (i.IsType(PersonKind.GuestStar))
                     {
                         return 1;
                     }
 
-                    if (i.IsType(PersonType.Director))
+                    if (i.IsType(PersonKind.Director))
                     {
                         return 2;
                     }
 
-                    if (i.IsType(PersonType.Writer))
+                    if (i.IsType(PersonKind.Writer))
                     {
                         return 3;
                     }
 
-                    if (i.IsType(PersonType.Producer))
+                    if (i.IsType(PersonKind.Producer))
                     {
                         return 4;
                     }
 
-                    if (i.IsType(PersonType.Composer))
+                    if (i.IsType(PersonKind.Composer))
                     {
                         return 4;
                     }
@@ -552,7 +936,7 @@ namespace Emby.Server.Implementations.Dto
 
             var list = new List<BaseItemPerson>();
 
-            var dictionary = people.Select(p => p.Name)
+            Dictionary<string, Person> dictionary = people.Select(p => p.Name)
                 .Distinct(StringComparer.OrdinalIgnoreCase).Select(c =>
                 {
                     try
@@ -564,10 +948,10 @@ namespace Emby.Server.Implementations.Dto
                         _logger.LogError(ex, "Error getting person {Name}", c);
                         return null;
                     }
-                }).Where(i => i != null)
-                .GroupBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
-                .Select(x => x.First())
-                .ToDictionary(i => i.Name, StringComparer.OrdinalIgnoreCase);
+                }).Where(i => i is not null)
+                .Where(i => user is null || i!.IsVisible(user))
+                .DistinctBy(x => x!.Name, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(i => i!.Name, StringComparer.OrdinalIgnoreCase)!; // null values got filtered out
 
             for (var i = 0; i < people.Count; i++)
             {
@@ -580,19 +964,19 @@ namespace Emby.Server.Implementations.Dto
                     Type = person.Type
                 };
 
-                if (dictionary.TryGetValue(person.Name, out Person entity))
+                if (dictionary.TryGetValue(person.Name, out Person? entity))
                 {
                     baseItemPerson.PrimaryImageTag = GetTagAndFillBlurhash(dto, entity, ImageType.Primary);
-                    baseItemPerson.Id = entity.Id.ToString("N", CultureInfo.InvariantCulture);
-                    if (dto.ImageBlurHashes != null)
+                    baseItemPerson.Id = entity.Id;
+                    if (dto.ImageBlurHashes is not null)
                     {
                         // Only add BlurHash for the person's image.
-                        baseItemPerson.ImageBlurHashes = new Dictionary<ImageType, Dictionary<string, string>>();
+                        baseItemPerson.ImageBlurHashes = [];
                         foreach (var (imageType, blurHash) in dto.ImageBlurHashes)
                         {
-                            if (blurHash != null)
+                            if (blurHash is not null)
                             {
-                                baseItemPerson.ImageBlurHashes[imageType] = new Dictionary<string, string>();
+                                baseItemPerson.ImageBlurHashes[imageType] = [];
                                 foreach (var (imageId, blurHashValue) in blurHash)
                                 {
                                     if (string.Equals(baseItemPerson.PrimaryImageTag, imageId, StringComparison.OrdinalIgnoreCase))
@@ -616,7 +1000,6 @@ namespace Emby.Server.Implementations.Dto
         /// </summary>
         /// <param name="dto">The dto.</param>
         /// <param name="item">The item.</param>
-        /// <returns>Task.</returns>
         private void AttachStudios(BaseItemDto dto, BaseItem item)
         {
             dto.Studios = item.Studios
@@ -651,10 +1034,10 @@ namespace Emby.Server.Implementations.Dto
             return _libraryManager.GetGenreId(name);
         }
 
-        private string GetTagAndFillBlurhash(BaseItemDto dto, BaseItem item, ImageType imageType, int imageIndex = 0)
+        private string? GetTagAndFillBlurhash(BaseItemDto dto, BaseItem item, ImageType imageType, int imageIndex = 0)
         {
             var image = item.GetImageInfo(imageType, imageIndex);
-            if (image != null)
+            if (image is not null)
             {
                 return GetTagAndFillBlurhash(dto, item, image);
             }
@@ -662,19 +1045,25 @@ namespace Emby.Server.Implementations.Dto
             return null;
         }
 
-        private string GetTagAndFillBlurhash(BaseItemDto dto, BaseItem item, ItemImageInfo image)
+        private string? GetTagAndFillBlurhash(BaseItemDto dto, BaseItem item, ItemImageInfo image)
         {
             var tag = GetImageCacheTag(item, image);
+            if (tag is null)
+            {
+                return null;
+            }
+
             if (!string.IsNullOrEmpty(image.BlurHash))
             {
-                dto.ImageBlurHashes ??= new Dictionary<ImageType, Dictionary<string, string>>();
+                dto.ImageBlurHashes ??= [];
 
-                if (!dto.ImageBlurHashes.ContainsKey(image.Type))
+                if (!dto.ImageBlurHashes.TryGetValue(image.Type, out var value))
                 {
-                    dto.ImageBlurHashes[image.Type] = new Dictionary<string, string>();
+                    value = [];
+                    dto.ImageBlurHashes[image.Type] = value;
                 }
 
-                dto.ImageBlurHashes[image.Type][tag] = image.BlurHash;
+                value[tag] = image.BlurHash;
             }
 
             return tag;
@@ -701,7 +1090,7 @@ namespace Emby.Server.Implementations.Dto
 
             if (hashes.Count > 0)
             {
-                dto.ImageBlurHashes ??= new Dictionary<ImageType, Dictionary<string, string>>();
+                dto.ImageBlurHashes ??= [];
 
                 dto.ImageBlurHashes[imageType] = hashes;
             }
@@ -716,7 +1105,10 @@ namespace Emby.Server.Implementations.Dto
         /// <param name="item">The item.</param>
         /// <param name="owner">The owner.</param>
         /// <param name="options">The options.</param>
-        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem owner, DtoOptions options)
+        /// <param name="artistsBatch">Optional pre-fetched artist lookup shared across a batch of items.</param>
+        /// <param name="user">The user, for per-user values such as the accessible media source count.</param>
+        /// <param name="alternateVersionItemIds">Optional pre-fetched set of item IDs that own alternate versions, shared across a batch of items.</param>
+        private void AttachBasicFields(BaseItemDto dto, BaseItem item, BaseItem? owner, DtoOptions options, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch = null, User? user = null, IReadOnlySet<Guid>? alternateVersionItemIds = null)
         {
             if (options.ContainsField(ItemFields.DateCreated))
             {
@@ -743,27 +1135,17 @@ namespace Emby.Server.Implementations.Dto
                 dto.Tags = item.Tags;
             }
 
-            var hasAspectRatio = item as IHasAspectRatio;
-            if (hasAspectRatio != null)
+            if (item is IHasAspectRatio hasAspectRatio)
             {
                 dto.AspectRatio = hasAspectRatio.AspectRatio;
             }
 
-            dto.ImageBlurHashes = new Dictionary<ImageType, Dictionary<string, string>>();
+            dto.ImageBlurHashes = [];
 
             var backdropLimit = options.GetImageLimit(ImageType.Backdrop);
             if (backdropLimit > 0)
             {
                 dto.BackdropImageTags = GetTagsAndFillBlurhashes(dto, item, ImageType.Backdrop, backdropLimit);
-            }
-
-            if (options.ContainsField(ItemFields.ScreenshotImageTags))
-            {
-                var screenshotLimit = options.GetImageLimit(ImageType.Screenshot);
-                if (screenshotLimit > 0)
-                {
-                    dto.ScreenshotImageTags = GetTagsAndFillBlurhashes(dto, item, ImageType.Screenshot, screenshotLimit);
-                }
             }
 
             if (options.ContainsField(ItemFields.Genres))
@@ -774,7 +1156,7 @@ namespace Emby.Server.Implementations.Dto
 
             if (options.EnableImages)
             {
-                dto.ImageTags = new Dictionary<ImageType, string>();
+                dto.ImageTags = [];
 
                 // Prevent implicitly captured closure
                 var currentItem = item;
@@ -784,7 +1166,7 @@ namespace Emby.Server.Implementations.Dto
                     {
                         var tag = GetTagAndFillBlurhash(dto, item, image);
 
-                        if (tag != null)
+                        if (tag is not null)
                         {
                             dto.ImageTags[image.Type] = tag;
                         }
@@ -807,7 +1189,7 @@ namespace Emby.Server.Implementations.Dto
 
             dto.MediaType = item.MediaType;
 
-            if (!(item is LiveTvProgram))
+            if (item is not LiveTvProgram)
             {
                 dto.LocationType = item.LocationType;
             }
@@ -850,12 +1232,14 @@ namespace Emby.Server.Implementations.Dto
                 dto.OriginalTitle = item.OriginalTitle;
             }
 
+            dto.OriginalLanguage = item.OriginalLanguage;
+
             if (options.ContainsField(ItemFields.ParentId))
             {
                 dto.ParentId = item.DisplayParentId;
             }
 
-            AddInheritedImages(dto, item, options, owner);
+            AddInheritedImages(dto, item, options, owner, artistsBatch);
 
             if (options.ContainsField(ItemFields.Path))
             {
@@ -903,34 +1287,48 @@ namespace Emby.Server.Implementations.Dto
                 dto.CommunityRating = item.CommunityRating;
             }
 
-            var supportsPlaceHolders = item as ISupportsPlaceHolders;
-            if (supportsPlaceHolders != null && supportsPlaceHolders.IsPlaceHolder)
+            if (item is ISupportsPlaceHolders supportsPlaceHolders && supportsPlaceHolders.IsPlaceHolder)
             {
                 dto.IsPlaceHolder = supportsPlaceHolders.IsPlaceHolder;
             }
 
+            if (item.LUFS.HasValue)
+            {
+                // -18 LUFS reference, same as ReplayGain 2.0, compatible with ReplayGain 1.0
+                dto.NormalizationGain = -18f - item.LUFS;
+            }
+            else if (item.NormalizationGain.HasValue)
+            {
+                dto.NormalizationGain = item.NormalizationGain;
+            }
+
             // Add audio info
-            var audio = item as Audio;
-            if (audio != null)
+            if (item is Audio audio)
             {
                 dto.Album = audio.Album;
-                if (audio.ExtraType.HasValue)
-                {
-                    dto.ExtraType = audio.ExtraType.Value.ToString();
-                }
+                dto.ExtraType = audio.ExtraType;
 
                 var albumParent = audio.AlbumEntity;
 
-                if (albumParent != null)
+                if (albumParent is not null)
                 {
                     dto.AlbumId = albumParent.Id;
                     dto.AlbumPrimaryImageTag = GetTagAndFillBlurhash(dto, albumParent, ImageType.Primary);
+                    if (albumParent.LUFS.HasValue)
+                    {
+                        // -18 LUFS reference, same as ReplayGain 2.0, compatible with ReplayGain 1.0
+                        dto.AlbumNormalizationGain = -18f - albumParent.LUFS;
+                    }
+                    else if (albumParent.NormalizationGain.HasValue)
+                    {
+                        dto.AlbumNormalizationGain = albumParent.NormalizationGain;
+                    }
                 }
 
                 // if (options.ContainsField(ItemFields.MediaSourceCount))
-                //{
+                // {
                 // Songs always have one
-                //}
+                // }
             }
 
             if (item is IHasArtist hasArtist)
@@ -938,10 +1336,10 @@ namespace Emby.Server.Implementations.Dto
                 dto.Artists = hasArtist.Artists;
 
                 // var artistItems = _libraryManager.GetArtists(new InternalItemsQuery
-                //{
+                // {
                 //    EnableTotalRecordCount = false,
                 //    ItemIds = new[] { item.Id.ToString("N", CultureInfo.InvariantCulture) }
-                //});
+                // });
 
                 // dto.ArtistItems = artistItems.Items
                 //    .Select(i =>
@@ -957,43 +1355,28 @@ namespace Emby.Server.Implementations.Dto
 
                 // Include artists that are not in the database yet, e.g., just added via metadata editor
                 // var foundArtists = artistItems.Items.Select(i => i.Item1.Name).ToList();
+                var artistsLookup = artistsBatch
+                    ?? _libraryManager.GetArtists([.. hasArtist.Artists.Where(e => !string.IsNullOrWhiteSpace(e))]);
+
                 dto.ArtistItems = hasArtist.Artists
-                    //.Except(foundArtists, new DistinctNameComparer())
-                    .Select(i =>
-                    {
-                        // This should not be necessary but we're seeing some cases of it
-                        if (string.IsNullOrEmpty(i))
-                        {
-                            return null;
-                        }
-
-                        var artist = _libraryManager.GetArtist(i, new DtoOptions(false)
-                        {
-                            EnableImages = false
-                        });
-                        if (artist != null)
-                        {
-                            return new NameGuidPair
-                            {
-                                Name = artist.Name,
-                                Id = artist.Id
-                            };
-                        }
-
-                        return null;
-                    }).Where(i => i != null).ToArray();
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Distinct()
+                    .Select(name => artistsLookup.TryGetValue(name, out var artists) && artists.Length > 0
+                        ? new NameGuidPair { Name = name, Id = artists[0].Id }
+                        : null)
+                    .Where(item => item is not null)
+                    .ToArray();
             }
 
-            var hasAlbumArtist = item as IHasAlbumArtist;
-            if (hasAlbumArtist != null)
+            if (item is IHasAlbumArtist hasAlbumArtist)
             {
                 dto.AlbumArtist = hasAlbumArtist.AlbumArtists.FirstOrDefault();
 
                 // var artistItems = _libraryManager.GetAlbumArtists(new InternalItemsQuery
-                //{
+                // {
                 //    EnableTotalRecordCount = false,
                 //    ItemIds = new[] { item.Id.ToString("N", CultureInfo.InvariantCulture) }
-                //});
+                // });
 
                 // dto.AlbumArtists = artistItems.Items
                 //    .Select(i =>
@@ -1007,36 +1390,21 @@ namespace Emby.Server.Implementations.Dto
                 //    })
                 //    .ToList();
 
+                var albumArtistsLookup = artistsBatch
+                    ?? _libraryManager.GetArtists([.. hasAlbumArtist.AlbumArtists.Where(e => !string.IsNullOrWhiteSpace(e))]);
+
                 dto.AlbumArtists = hasAlbumArtist.AlbumArtists
-                    //.Except(foundArtists, new DistinctNameComparer())
-                    .Select(i =>
-                    {
-                        // This should not be necessary but we're seeing some cases of it
-                        if (string.IsNullOrEmpty(i))
-                        {
-                            return null;
-                        }
-
-                        var artist = _libraryManager.GetArtist(i, new DtoOptions(false)
-                        {
-                            EnableImages = false
-                        });
-                        if (artist != null)
-                        {
-                            return new NameGuidPair
-                            {
-                                Name = artist.Name,
-                                Id = artist.Id
-                            };
-                        }
-
-                        return null;
-                    }).Where(i => i != null).ToArray();
+                    .Where(name => !string.IsNullOrWhiteSpace(name))
+                    .Distinct()
+                    .Select(name => albumArtistsLookup.TryGetValue(name, out var albumArtists) && albumArtists.Length > 0
+                        ? new NameGuidPair { Name = name, Id = albumArtists[0].Id }
+                        : null)
+                    .Where(item => item is not null)
+                    .ToArray();
             }
 
             // Add video info
-            var video = item as Video;
-            if (video != null)
+            if (item is Video video)
             {
                 dto.VideoType = video.VideoType;
                 dto.Video3DFormat = video.Video3DFormat;
@@ -1054,34 +1422,56 @@ namespace Emby.Server.Implementations.Dto
 
                 if (options.ContainsField(ItemFields.MediaSourceCount))
                 {
-                    var mediaSourceCount = video.MediaSourceCount;
-                    if (mediaSourceCount != 1)
+                    // A video with no primary version and no alternate versions always has a single
+                    // media source. Only compute the count for videos that might have more: a primary
+                    // version, or membership in the batch's set of items that own alternate versions.
+                    // Without the batch we can't rule it out, so fall back to computing (the single-item
+                    // path). Everything else is the common case and keeps the default count of one.
+                    var mayHaveAlternateVersions = alternateVersionItemIds is null
+                        || video.PrimaryVersionId.HasValue
+                        || alternateVersionItemIds.Contains(video.Id);
+
+                    if (mayHaveAlternateVersions)
                     {
-                        dto.MediaSourceCount = mediaSourceCount;
+                        // Match the per-user filtering of the media sources: versions the user cannot
+                        // access are not selectable, so they must not count towards the badge either.
+                        var mediaSourceCount = user is null
+                            || (!video.PrimaryVersionId.HasValue && video.LinkedAlternateVersions.Length == 0 && !video.HasLocalAlternateVersions)
+                                ? video.MediaSourceCount
+                                : video.GetAllVersions().Count(v => v.Id.Equals(video.Id) || v.IsVisibleStandalone(user));
+                        if (mediaSourceCount != 1)
+                        {
+                            dto.MediaSourceCount = mediaSourceCount;
+                        }
                     }
                 }
 
-                if (options.ContainsField(ItemFields.Chapters))
+                if (options.ContainsField(ItemFields.Trickplay))
                 {
-                    dto.Chapters = _itemRepo.GetChapters(item);
+                    var trickplay = _trickplayManager.GetTrickplayManifest(item).GetAwaiter().GetResult();
+                    dto.Trickplay = trickplay.ToDictionary(
+                        mediaStream => mediaStream.Key,
+                        mediaStream => mediaStream.Value.ToDictionary(
+                            width => width.Key,
+                            width => new TrickplayInfoDto(width.Value)));
                 }
 
-                if (video.ExtraType.HasValue)
-                {
-                    dto.ExtraType = video.ExtraType.Value.ToString();
-                }
+                dto.ExtraType = video.ExtraType;
+            }
+
+            if (options.ContainsField(ItemFields.Chapters))
+            {
+                dto.Chapters = _chapterManager.GetChapters(item.Id).ToList();
             }
 
             if (options.ContainsField(ItemFields.MediaStreams))
             {
                 // Add VideoInfo
-                var iHasMediaSources = item as IHasMediaSources;
-
-                if (iHasMediaSources != null)
+                if (item is IHasMediaSources)
                 {
                     MediaStream[] mediaStreams;
 
-                    if (dto.MediaSources != null && dto.MediaSources.Length > 0)
+                    if (dto.MediaSources is not null && dto.MediaSources.Length > 0)
                     {
                         if (item.SourceType == SourceType.Channel)
                         {
@@ -1104,7 +1494,7 @@ namespace Emby.Server.Implementations.Dto
                 }
             }
 
-            BaseItem[] allExtras = null;
+            BaseItem[]? allExtras = null;
 
             if (options.ContainsField(ItemFields.SpecialFeatureCount))
             {
@@ -1114,12 +1504,13 @@ namespace Emby.Server.Implementations.Dto
 
             if (options.ContainsField(ItemFields.LocalTrailerCount))
             {
-                allExtras ??= item.GetExtras().ToArray();
-                dto.LocalTrailerCount = allExtras.Count(i => i.ExtraType == ExtraType.Trailer);
-
                 if (item is IHasTrailers hasTrailers)
                 {
-                    dto.LocalTrailerCount += hasTrailers.GetTrailerCount();
+                    dto.LocalTrailerCount = hasTrailers.LocalTrailers.Count;
+                }
+                else
+                {
+                    dto.LocalTrailerCount = (allExtras ?? item.GetExtras()).Count(i => i.ExtraType == ExtraType.Trailer);
                 }
             }
 
@@ -1140,27 +1531,46 @@ namespace Emby.Server.Implementations.Dto
                 dto.SeasonId = episode.SeasonId;
                 dto.SeriesId = episode.SeriesId;
 
-                Series episodeSeries = null;
+                Series? episodeSeries = null;
 
                 // this block will add the series poster for episodes without a poster
                 // TODO maybe remove the if statement entirely
                 // if (options.ContainsField(ItemFields.SeriesPrimaryImage))
                 {
-                    episodeSeries = episodeSeries ?? episode.Series;
-                    if (episodeSeries != null)
+                    episodeSeries ??= episode.Series;
+                    if (episodeSeries is not null)
                     {
                         dto.SeriesPrimaryImageTag = GetTagAndFillBlurhash(dto, episodeSeries, ImageType.Primary);
-                        if (dto.ImageTags == null || !dto.ImageTags.ContainsKey(ImageType.Primary))
+                        if (dto.ImageTags is null || !dto.ImageTags.ContainsKey(ImageType.Primary))
                         {
                             AttachPrimaryImageAspectRatio(dto, episodeSeries);
                         }
                     }
                 }
 
+                if (options.GetImageLimit(ImageType.Primary) > 0)
+                {
+                    var episodeSeason = episode.Season;
+                    var seasonPrimaryTag = episodeSeason is not null
+                        ? GetTagAndFillBlurhash(dto, episodeSeason, ImageType.Primary)
+                        : null;
+
+                    if (seasonPrimaryTag is not null)
+                    {
+                        dto.ParentPrimaryImageItemId = episodeSeason!.Id;
+                        dto.ParentPrimaryImageTag = seasonPrimaryTag;
+                    }
+                    else if (episodeSeries is not null && dto.SeriesPrimaryImageTag is not null)
+                    {
+                        dto.ParentPrimaryImageItemId = episodeSeries.Id;
+                        dto.ParentPrimaryImageTag = dto.SeriesPrimaryImageTag;
+                    }
+                }
+
                 if (options.ContainsField(ItemFields.SeriesStudio))
                 {
-                    episodeSeries = episodeSeries ?? episode.Series;
-                    if (episodeSeries != null)
+                    episodeSeries ??= episode.Series;
+                    if (episodeSeries is not null)
                     {
                         dto.SeriesStudio = episodeSeries.Studios.FirstOrDefault();
                     }
@@ -1168,11 +1578,13 @@ namespace Emby.Server.Implementations.Dto
             }
 
             // Add SeriesInfo
-            if (item is Series series)
+            Series? series;
+            if (item is Series tmp)
             {
+                series = tmp;
                 dto.AirDays = series.AirDays;
                 dto.AirTime = series.AirTime;
-                dto.Status = series.Status.HasValue ? series.Status.Value.ToString() : null;
+                dto.Status = series.Status?.ToString();
             }
 
             // Add SeasonInfo
@@ -1185,8 +1597,8 @@ namespace Emby.Server.Implementations.Dto
 
                 if (options.ContainsField(ItemFields.SeriesStudio))
                 {
-                    series = series ?? season.Series;
-                    if (series != null)
+                    series ??= season.Series;
+                    if (series is not null)
                     {
                         dto.SeriesStudio = series.Studios.FirstOrDefault();
                     }
@@ -1196,11 +1608,11 @@ namespace Emby.Server.Implementations.Dto
                 // TODO maybe remove the if statement entirely
                 // if (options.ContainsField(ItemFields.SeriesPrimaryImage))
                 {
-                    series = series ?? season.Series;
-                    if (series != null)
+                    series ??= season.Series;
+                    if (series is not null)
                     {
                         dto.SeriesPrimaryImageTag = GetTagAndFillBlurhash(dto, series, ImageType.Primary);
-                        if (dto.ImageTags == null || !dto.ImageTags.ContainsKey(ImageType.Primary))
+                        if (dto.ImageTags is null || !dto.ImageTags.ContainsKey(ImageType.Primary))
                         {
                             AttachPrimaryImageAspectRatio(dto, series);
                         }
@@ -1263,19 +1675,19 @@ namespace Emby.Server.Implementations.Dto
             if (item.SourceType == SourceType.Channel)
             {
                 var channel = _libraryManager.GetItemById(item.ChannelId);
-                if (channel != null)
+                if (channel is not null)
                 {
                     dto.ChannelName = channel.Name;
                 }
             }
         }
 
-        private BaseItem GetImageDisplayParent(BaseItem currentItem, BaseItem originalItem)
+        private BaseItem? GetImageDisplayParent(BaseItem currentItem, BaseItem originalItem, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch)
         {
             if (currentItem is MusicAlbum musicAlbum)
             {
-                var artist = musicAlbum.GetMusicArtist(new DtoOptions(false));
-                if (artist != null)
+                var artist = GetBatchedAlbumArtist(musicAlbum, artistsBatch) ?? musicAlbum.GetMusicArtist(new DtoOptions(false));
+                if (artist is not null)
                 {
                     return artist;
                 }
@@ -1283,7 +1695,7 @@ namespace Emby.Server.Implementations.Dto
 
             var parent = currentItem.DisplayParent ?? currentItem.GetOwner() ?? currentItem.GetParent();
 
-            if (parent == null && !(originalItem is UserRootFolder) && !(originalItem is UserView) && !(originalItem is AggregateFolder) && !(originalItem is ICollectionFolder) && !(originalItem is Channel))
+            if (parent is null && originalItem is not UserRootFolder && originalItem is not UserView && originalItem is not AggregateFolder && originalItem is not ICollectionFolder && originalItem is not Channel)
             {
                 parent = _libraryManager.GetCollectionFolders(originalItem).FirstOrDefault();
             }
@@ -1291,8 +1703,36 @@ namespace Emby.Server.Implementations.Dto
             return parent;
         }
 
-        private void AddInheritedImages(BaseItemDto dto, BaseItem item, DtoOptions options, BaseItem owner)
+        private static MusicArtist? GetBatchedAlbumArtist(MusicAlbum album, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch)
         {
+            if (artistsBatch is null)
+            {
+                return null;
+            }
+
+            var name = album.AlbumArtists.Count > 0 ? album.AlbumArtists[0] : null;
+            return !string.IsNullOrEmpty(name) && artistsBatch.TryGetValue(name, out var artists) && artists.Length > 0
+                ? artists[0]
+                : null;
+        }
+
+        private void AddInheritedImages(BaseItemDto dto, BaseItem item, DtoOptions options, BaseItem? owner, IReadOnlyDictionary<string, MusicArtist[]>? artistsBatch)
+        {
+            if (item is UserView { ViewType: CollectionType.playlists } playlistsView
+                && options.GetImageLimit(ImageType.Primary) > 0
+                && !playlistsView.DisplayParentId.IsEmpty())
+            {
+                var displayParent = _libraryManager.GetItemById(playlistsView.DisplayParentId);
+                var displayParentPrimaryImage = displayParent?.GetImageInfo(ImageType.Primary, 0);
+
+                if (displayParentPrimaryImage is not null)
+                {
+                    dto.ImageTags?.Remove(ImageType.Primary);
+                    dto.ParentPrimaryImageItemId = displayParent!.Id;
+                    dto.ParentPrimaryImageTag = GetTagAndFillBlurhash(dto, displayParent, displayParentPrimaryImage);
+                }
+            }
+
             if (!item.SupportsInheritedParentImages)
             {
                 return;
@@ -1311,61 +1751,64 @@ namespace Emby.Server.Implementations.Dto
                 return;
             }
 
-            BaseItem parent = null;
+            BaseItem? parent = null;
             var isFirst = true;
 
             var imageTags = dto.ImageTags;
 
-            while (((!(imageTags != null && imageTags.ContainsKey(ImageType.Logo)) && logoLimit > 0) || (!(imageTags != null && imageTags.ContainsKey(ImageType.Art)) && artLimit > 0) || (!(imageTags != null && imageTags.ContainsKey(ImageType.Thumb)) && thumbLimit > 0) || parent is Series) &&
-                (parent = parent ?? (isFirst ? GetImageDisplayParent(item, item) ?? owner : parent)) != null)
+            while ((!(imageTags is not null && imageTags.ContainsKey(ImageType.Logo)) && logoLimit > 0)
+                || (!(imageTags is not null && imageTags.ContainsKey(ImageType.Art)) && artLimit > 0)
+                || (!(imageTags is not null && imageTags.ContainsKey(ImageType.Thumb)) && thumbLimit > 0)
+                || parent is Series)
             {
-                if (parent == null)
+                parent ??= isFirst ? GetImageDisplayParent(item, item, artistsBatch) ?? owner : parent;
+                if (parent is null)
                 {
                     break;
                 }
 
                 var allImages = parent.ImageInfos;
 
-                if (logoLimit > 0 && !(imageTags != null && imageTags.ContainsKey(ImageType.Logo)) && dto.ParentLogoItemId == null)
+                if (logoLimit > 0 && !(imageTags is not null && imageTags.ContainsKey(ImageType.Logo)) && dto.ParentLogoItemId is null)
                 {
                     var image = allImages.FirstOrDefault(i => i.Type == ImageType.Logo);
 
-                    if (image != null)
+                    if (image is not null)
                     {
-                        dto.ParentLogoItemId = GetDtoId(parent);
+                        dto.ParentLogoItemId = parent.Id;
                         dto.ParentLogoImageTag = GetTagAndFillBlurhash(dto, parent, image);
                     }
                 }
 
-                if (artLimit > 0 && !(imageTags != null && imageTags.ContainsKey(ImageType.Art)) && dto.ParentArtItemId == null)
+                if (artLimit > 0 && !(imageTags is not null && imageTags.ContainsKey(ImageType.Art)) && dto.ParentArtItemId is null)
                 {
                     var image = allImages.FirstOrDefault(i => i.Type == ImageType.Art);
 
-                    if (image != null)
+                    if (image is not null)
                     {
-                        dto.ParentArtItemId = GetDtoId(parent);
+                        dto.ParentArtItemId = parent.Id;
                         dto.ParentArtImageTag = GetTagAndFillBlurhash(dto, parent, image);
                     }
                 }
 
-                if (thumbLimit > 0 && !(imageTags != null && imageTags.ContainsKey(ImageType.Thumb)) && (dto.ParentThumbItemId == null || parent is Series) && !(parent is ICollectionFolder) && !(parent is UserView))
+                if (thumbLimit > 0 && !(imageTags is not null && imageTags.ContainsKey(ImageType.Thumb)) && (dto.ParentThumbItemId is null || parent is Series) && parent is not ICollectionFolder && parent is not UserView)
                 {
                     var image = allImages.FirstOrDefault(i => i.Type == ImageType.Thumb);
 
-                    if (image != null)
+                    if (image is not null)
                     {
-                        dto.ParentThumbItemId = GetDtoId(parent);
+                        dto.ParentThumbItemId = parent.Id;
                         dto.ParentThumbImageTag = GetTagAndFillBlurhash(dto, parent, image);
                     }
                 }
 
-                if (backdropLimit > 0 && !((dto.BackdropImageTags != null && dto.BackdropImageTags.Length > 0) || (dto.ParentBackdropImageTags != null && dto.ParentBackdropImageTags.Length > 0)))
+                if (backdropLimit > 0 && !((dto.BackdropImageTags is not null && dto.BackdropImageTags.Length > 0) || (dto.ParentBackdropImageTags is not null && dto.ParentBackdropImageTags.Length > 0)))
                 {
                     var images = allImages.Where(i => i.Type == ImageType.Backdrop).Take(backdropLimit).ToList();
 
                     if (images.Count > 0)
                     {
-                        dto.ParentBackdropItemId = GetDtoId(parent);
+                        dto.ParentBackdropItemId = parent.Id;
                         dto.ParentBackdropImageTags = GetTagsAndFillBlurhashes(dto, parent, ImageType.Backdrop, images);
                     }
                 }
@@ -1377,11 +1820,11 @@ namespace Emby.Server.Implementations.Dto
                     break;
                 }
 
-                parent = GetImageDisplayParent(parent, item);
+                parent = GetImageDisplayParent(parent, item, artistsBatch);
             }
         }
 
-        private string GetMappedPath(BaseItem item, BaseItem ownerItem)
+        private string GetMappedPath(BaseItem item, BaseItem? ownerItem)
         {
             var path = item.Path;
 
@@ -1398,7 +1841,6 @@ namespace Emby.Server.Implementations.Dto
         /// </summary>
         /// <param name="dto">The dto.</param>
         /// <param name="item">The item.</param>
-        /// <returns>Task.</returns>
         public void AttachPrimaryImageAspectRatio(IItemDto dto, BaseItem item)
         {
             dto.PrimaryImageAspectRatio = GetPrimaryImageAspectRatio(item);
@@ -1408,49 +1850,32 @@ namespace Emby.Server.Implementations.Dto
         {
             var imageInfo = item.GetImageInfo(ImageType.Primary, 0);
 
-            if (imageInfo == null)
+            if (imageInfo is null)
             {
                 return null;
-            }
-
-            ImageDimensions size;
-
-            var defaultAspectRatio = item.GetDefaultPrimaryImageAspectRatio();
-
-            if (defaultAspectRatio > 0)
-            {
-                return defaultAspectRatio;
             }
 
             if (!imageInfo.IsLocalFile)
             {
-                return null;
+                return item.GetDefaultPrimaryImageAspectRatio();
             }
 
             try
             {
-                size = _imageProcessor.GetImageDimensions(item, imageInfo);
-
-                if (size.Width <= 0 || size.Height <= 0)
+                var size = _imageProcessor.GetImageDimensions(item, imageInfo);
+                var width = size.Width;
+                var height = size.Height;
+                if (width > 0 && height > 0)
                 {
-                    return null;
+                    return (double)width / height;
                 }
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "Failed to determine primary image aspect ratio for {0}", imageInfo.Path);
-                return null;
+                _logger.LogError(ex, "Failed to determine primary image aspect ratio for {ImagePath}", imageInfo.Path);
             }
 
-            var width = size.Width;
-            var height = size.Height;
-
-            if (width <= 0 || height <= 0)
-            {
-                return null;
-            }
-
-            return (double)width / height;
+            return item.GetDefaultPrimaryImageAspectRatio();
         }
     }
 }

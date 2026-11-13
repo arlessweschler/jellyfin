@@ -13,6 +13,11 @@ namespace MediaBrowser.Model.Configuration
         LocalMetadataProvider,
         MetadataFetcher,
         MetadataSaver,
-        SubtitleFetcher
+        SubtitleFetcher,
+        LyricFetcher,
+        MediaSegmentProvider,
+        LocalSimilarityProvider,
+        SimilarityProvider,
+        SearchProvider
     }
 }

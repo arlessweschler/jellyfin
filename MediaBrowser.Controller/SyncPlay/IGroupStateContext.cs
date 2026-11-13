@@ -34,6 +34,12 @@ namespace MediaBrowser.Controller.SyncPlay
         long MaxPlaybackOffset { get; }
 
         /// <summary>
+        /// Gets the maximum offset accepted for a session catching up after buffering, in milliseconds.
+        /// </summary>
+        /// <value>The maximum catch-up offset, in milliseconds.</value>
+        long MaxCatchUpOffset => 60000;
+
+        /// <summary>
         /// Gets the group identifier.
         /// </summary>
         /// <value>The group identifier.</value>
@@ -66,11 +72,11 @@ namespace MediaBrowser.Controller.SyncPlay
         /// <summary>
         /// Sends a GroupUpdate message to the interested sessions.
         /// </summary>
-        /// <typeparam name="T">The type of the data of the message.</typeparam>
         /// <param name="from">The current session.</param>
         /// <param name="type">The filtering type.</param>
         /// <param name="message">The message to send.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
+        /// <typeparam name="T">The group update type.</typeparam>
         /// <returns>The task.</returns>
         Task SendGroupUpdate<T>(SessionInfo from, SyncPlayBroadcastType type, GroupUpdate<T> message, CancellationToken cancellationToken);
 
@@ -90,15 +96,6 @@ namespace MediaBrowser.Controller.SyncPlay
         /// <param name="type">The command type.</param>
         /// <returns>The command.</returns>
         SendCommand NewSyncPlayCommand(SendCommandType type);
-
-        /// <summary>
-        /// Builds a new group update message.
-        /// </summary>
-        /// <typeparam name="T">The type of the data of the message.</typeparam>
-        /// <param name="type">The update type.</param>
-        /// <param name="data">The data to send.</param>
-        /// <returns>The group update.</returns>
-        GroupUpdate<T> NewSyncPlayGroupUpdate<T>(GroupUpdateType type, T data);
 
         /// <summary>
         /// Sanitizes the PositionTicks, considers the current playing item when available.
@@ -161,6 +158,12 @@ namespace MediaBrowser.Controller.SyncPlay
         /// <param name="playlistItemId">The new playing item identifier.</param>
         /// <returns><c>true</c> if the play queue has been changed; <c>false</c> if something went wrong.</returns>
         bool SetPlayingItem(Guid playlistItemId);
+
+        /// <summary>
+        /// Clears the play queue.
+        /// </summary>
+        /// <param name="clearPlayingItem">Whether to remove the playing item as well.</param>
+        void ClearPlayQueue(bool clearPlayingItem);
 
         /// <summary>
         /// Removes items from the play queue.

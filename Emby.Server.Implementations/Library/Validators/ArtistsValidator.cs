@@ -1,107 +1,147 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Jellyfin.Data.Enums;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Persistence;
 using Microsoft.Extensions.Logging;
 
-namespace Emby.Server.Implementations.Library.Validators
+namespace Emby.Server.Implementations.Library.Validators;
+
+/// <summary>
+/// Class ArtistsValidator.
+/// </summary>
+public class ArtistsValidator
 {
     /// <summary>
-    /// Class ArtistsValidator.
+    /// The library manager.
     /// </summary>
-    public class ArtistsValidator
+    private readonly ILibraryManager _libraryManager;
+
+    /// <summary>
+    /// The logger.
+    /// </summary>
+    private readonly ILogger<ArtistsValidator> _logger;
+    private readonly IItemRepository _itemRepo;
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="ArtistsValidator" /> class.
+    /// </summary>
+    /// <param name="libraryManager">The library manager.</param>
+    /// <param name="logger">The logger.</param>
+    /// <param name="itemRepo">The item repository.</param>
+    public ArtistsValidator(ILibraryManager libraryManager, ILogger<ArtistsValidator> logger, IItemRepository itemRepo)
     {
-        /// <summary>
-        /// The library manager.
-        /// </summary>
-        private readonly ILibraryManager _libraryManager;
+        _libraryManager = libraryManager;
+        _logger = logger;
+        _itemRepo = itemRepo;
+    }
 
-        /// <summary>
-        /// The logger.
-        /// </summary>
-        private readonly ILogger<ArtistsValidator> _logger;
-        private readonly IItemRepository _itemRepo;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="ArtistsValidator" /> class.
-        /// </summary>
-        /// <param name="libraryManager">The library manager.</param>
-        /// <param name="logger">The logger.</param>
-        /// <param name="itemRepo">The item repository.</param>
-        public ArtistsValidator(ILibraryManager libraryManager, ILogger<ArtistsValidator> logger, IItemRepository itemRepo)
+    /// <summary>
+    /// Runs the specified progress.
+    /// </summary>
+    /// <param name="progress">The progress.</param>
+    /// <param name="cancellationToken">The cancellation token.</param>
+    /// <returns>Task.</returns>
+    public async Task Run(IProgress<double> progress, CancellationToken cancellationToken)
+    {
+        var names = _itemRepo.GetAllArtistNames();
+        var existingArtistIds = _libraryManager.GetItemIds(new InternalItemsQuery
         {
-            _libraryManager = libraryManager;
-            _logger = logger;
-            _itemRepo = itemRepo;
+            IncludeItemTypes = [BaseItemKind.MusicArtist]
+        }).ToHashSet();
+
+        var existingArtists = _libraryManager.GetArtists(names);
+
+        var numComplete = 0;
+        var count = names.Count;
+        var refreshed = 0;
+
+        var liveIds = new HashSet<Guid>();
+        var unresolved = 0;
+
+        foreach (var name in names)
+        {
+            try
+            {
+                MusicArtist? item = null;
+                if (existingArtists.TryGetValue(name, out var artists) && artists.Length > 0)
+                {
+                    item = artists.OrderBy(i => i.IsAccessedByName ? 1 : 0).First();
+                }
+
+                // Fall back to GetArtist if not found (creates new item if needed)
+                item ??= _libraryManager.GetArtist(name);
+
+                // A name with no item is nothing to refresh, and nothing to keep alive either.
+                if (item is not null)
+                {
+                    liveIds.Add(item.Id);
+
+                    var isNew = !existingArtistIds.Contains(item.Id);
+                    var neverRefreshed = item.DateLastRefreshed == default;
+
+                    if (isNew || neverRefreshed)
+                    {
+                        await item.RefreshMetadata(cancellationToken).ConfigureAwait(false);
+                        refreshed++;
+                    }
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                unresolved++;
+                _logger.LogError(ex, "Error refreshing {ArtistName}", name);
+            }
+
+            numComplete++;
+            double percent = numComplete;
+            percent /= count;
+            percent *= 100;
+
+            progress.Report(percent);
         }
 
-        /// <summary>
-        /// Runs the specified progress.
-        /// </summary>
-        /// <param name="progress">The progress.</param>
-        /// <param name="cancellationToken">The cancellation token.</param>
-        /// <returns>Task.</returns>
-        public async Task Run(IProgress<double> progress, CancellationToken cancellationToken)
+        _logger.LogInformation("Refreshed metadata for {RefreshedCount} new artists out of {TotalCount} total", refreshed, count);
+
+        // Every name that threw is a name whose artist is missing from the live set, and deleting against
+        // a live set with holes in it deletes artists the library still refers to. Leave the sweep to a
+        // run that got a clean read of them.
+        if (unresolved > 0)
         {
-            var names = _itemRepo.GetAllArtistNames();
-
-            var numComplete = 0;
-            var count = names.Count;
-
-            foreach (var name in names)
-            {
-                try
-                {
-                    var item = _libraryManager.GetArtist(name);
-
-                    await item.RefreshMetadata(cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    // Don't clutter the log
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error refreshing {ArtistName}", name);
-                }
-
-                numComplete++;
-                double percent = numComplete;
-                percent /= count;
-                percent *= 100;
-
-                progress.Report(percent);
-            }
-
-            var deadEntities = _libraryManager.GetItemList(new InternalItemsQuery
-            {
-                IncludeItemTypes = new[] { nameof(MusicArtist) },
-                IsDeadArtist = true,
-                IsLocked = false
-            }).Cast<MusicArtist>().ToList();
-
-            foreach (var item in deadEntities)
-            {
-                if (!item.IsAccessedByName)
-                {
-                    continue;
-                }
-
-                _logger.LogInformation("Deleting dead {2} {0} {1}.", item.Id.ToString("N", CultureInfo.InvariantCulture), item.Name, item.GetType().Name);
-
-                _libraryManager.DeleteItem(item, new DeleteOptions
-                {
-                    DeleteFileLocation = false
-                }, false);
-            }
+            _logger.LogWarning(
+                "Not removing dead artists: {Count} of {TotalCount} names could not be resolved this run",
+                unresolved,
+                count);
 
             progress.Report(100);
+            return;
         }
+
+        var deadEntities = _libraryManager.GetItemList(new InternalItemsQuery
+        {
+            IncludeItemTypes = [BaseItemKind.MusicArtist],
+            IsLocked = false
+        }).OfType<MusicArtist>()
+        .Where(item => item.IsAccessedByName && !liveIds.Contains(item.Id))
+        .ToList();
+
+        foreach (var item in deadEntities)
+        {
+            _logger.LogInformation("Deleting dead {ItemType} {ItemId} {ItemName}", item.GetType().Name, item.Id.ToString("N", CultureInfo.InvariantCulture), item.Name);
+        }
+
+        _libraryManager.DeleteItemsUnsafeFast(deadEntities, deleteSourceFiles: true);
+
+        progress.Report(100);
     }
 }

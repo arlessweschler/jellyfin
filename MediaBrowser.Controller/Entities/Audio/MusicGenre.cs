@@ -5,7 +5,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text.Json.Serialization;
-using MediaBrowser.Controller.Extensions;
+using Jellyfin.Data.Enums;
+using Jellyfin.Extensions;
 using Microsoft.Extensions.Logging;
 
 namespace MediaBrowser.Controller.Entities.Audio
@@ -13,21 +14,9 @@ namespace MediaBrowser.Controller.Entities.Audio
     /// <summary>
     /// Class MusicGenre.
     /// </summary>
+    [Common.RequiresSourceSerialisation]
     public class MusicGenre : BaseItem, IItemByName
     {
-        public override List<string> GetUserDataKeys()
-        {
-            var list = base.GetUserDataKeys();
-
-            list.Insert(0, GetType().Name + "-" + (Name ?? string.Empty).RemoveDiacritics());
-            return list;
-        }
-
-        public override string CreatePresentationUniqueKey()
-        {
-            return GetUserDataKeys()[0];
-        }
-
         [JsonIgnore]
         public override bool SupportsAddingToPlaylist => true;
 
@@ -45,6 +34,22 @@ namespace MediaBrowser.Controller.Entities.Audio
         [JsonIgnore]
         public override string ContainingFolderPath => Path;
 
+        [JsonIgnore]
+        public override bool SupportsPeople => false;
+
+        public override List<string> GetUserDataKeys()
+        {
+            var list = base.GetUserDataKeys();
+
+            list.Insert(0, GetType().Name + "-" + (Name ?? string.Empty).RemoveDiacritics());
+            return list;
+        }
+
+        public override string CreatePresentationUniqueKey()
+        {
+            return GetUserDataKeys()[0];
+        }
+
         public override double GetDefaultPrimaryImageAspectRatio()
         {
             return 1;
@@ -60,13 +65,10 @@ namespace MediaBrowser.Controller.Entities.Audio
             return true;
         }
 
-        [JsonIgnore]
-        public override bool SupportsPeople => false;
-
-        public IList<BaseItem> GetTaggedItems(InternalItemsQuery query)
+        public IReadOnlyList<BaseItem> GetTaggedItems(InternalItemsQuery query)
         {
             query.GenreIds = new[] { Id };
-            query.IncludeItemTypes = new[] { nameof(MusicVideo), nameof(Audio), nameof(MusicAlbum), nameof(MusicArtist) };
+            query.IncludeItemTypes = new[] { BaseItemKind.MusicVideo, BaseItemKind.Audio, BaseItemKind.MusicAlbum, BaseItemKind.MusicArtist };
 
             return LibraryManager.GetItemList(query);
         }
@@ -78,10 +80,7 @@ namespace MediaBrowser.Controller.Entities.Audio
 
         public static string GetPath(string name, bool normalizeName)
         {
-            // Trim the period at the end because windows will have a hard time with that
-            var validName = normalizeName ?
-                FileSystem.GetValidFilename(name).Trim().TrimEnd('.') :
-                name;
+            var validName = normalizeName ? GetItemByNameFolderName(name) : name;
 
             return System.IO.Path.Combine(ConfigurationManager.ApplicationPaths.MusicGenrePath, validName);
         }
@@ -106,6 +105,8 @@ namespace MediaBrowser.Controller.Entities.Audio
         /// <summary>
         /// This is called before any metadata refresh and returns true or false indicating if changes were made.
         /// </summary>
+        /// <param name="replaceAllMetadata">Option to replace metadata.</param>
+        /// <returns>True if metadata changed.</returns>
         public override bool BeforeMetadataRefresh(bool replaceAllMetadata)
         {
             var hasChanges = base.BeforeMetadataRefresh(replaceAllMetadata);

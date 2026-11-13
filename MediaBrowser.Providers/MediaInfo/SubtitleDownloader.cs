@@ -1,4 +1,6 @@
-#pragma warning disable CS1591
+#nullable disable
+
+#pragma warning disable CA1002, CS1591
 
 using System;
 using System.Collections.Generic;
@@ -29,13 +31,14 @@ namespace MediaBrowser.Providers.MediaInfo
 
         public async Task<List<string>> DownloadSubtitles(
             Video video,
-            List<MediaStream> mediaStreams,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
             IEnumerable<string> languages,
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             var downloadedLanguages = new List<string>();
@@ -51,6 +54,7 @@ namespace MediaBrowser.Providers.MediaInfo
                     lang,
                     disabledSubtitleFetchers,
                     subtitleFetcherOrder,
+                    isAutomated,
                     cancellationToken).ConfigureAwait(false);
 
                 if (downloaded)
@@ -64,13 +68,14 @@ namespace MediaBrowser.Providers.MediaInfo
 
         public Task<bool> DownloadSubtitles(
             Video video,
-            List<MediaStream> mediaStreams,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
             string lang,
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             if (video.VideoType != VideoType.VideoFile)
@@ -109,12 +114,13 @@ namespace MediaBrowser.Providers.MediaInfo
                 disabledSubtitleFetchers,
                 subtitleFetcherOrder,
                 mediaType,
+                isAutomated,
                 cancellationToken);
         }
 
         private async Task<bool> DownloadSubtitles(
             Video video,
-            List<MediaStream> mediaStreams,
+            IReadOnlyList<MediaStream> mediaStreams,
             bool skipIfEmbeddedSubtitlesPresent,
             bool skipIfAudioTrackMatches,
             bool requirePerfectMatch,
@@ -122,6 +128,7 @@ namespace MediaBrowser.Providers.MediaInfo
             string[] disabledSubtitleFetchers,
             string[] subtitleFetcherOrder,
             VideoContentType mediaType,
+            bool isAutomated,
             CancellationToken cancellationToken)
         {
             // There's already subtitles for this language
@@ -169,7 +176,8 @@ namespace MediaBrowser.Providers.MediaInfo
 
                 IsPerfectMatch = requirePerfectMatch,
                 DisabledSubtitleFetchers = disabledSubtitleFetchers,
-                SubtitleFetcherOrder = subtitleFetcherOrder
+                SubtitleFetcherOrder = subtitleFetcherOrder,
+                IsAutomated = isAutomated
             };
 
             if (video is Episode episode)
@@ -184,7 +192,7 @@ namespace MediaBrowser.Providers.MediaInfo
 
                 var result = searchResults.FirstOrDefault();
 
-                if (result != null)
+                if (result is not null)
                 {
                     await _subtitleManager.DownloadSubtitles(video, result.Id, cancellationToken).ConfigureAwait(false);
 

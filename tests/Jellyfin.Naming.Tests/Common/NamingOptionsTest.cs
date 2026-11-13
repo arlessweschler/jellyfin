@@ -10,11 +10,8 @@ namespace Jellyfin.Naming.Tests.Common
         {
             var options = new NamingOptions();
 
-            Assert.NotEmpty(options.VideoFileStackingRegexes);
             Assert.NotEmpty(options.CleanDateTimeRegexes);
             Assert.NotEmpty(options.CleanStringRegexes);
-            Assert.NotEmpty(options.EpisodeWithoutSeasonRegexes);
-            Assert.NotEmpty(options.EpisodeMultiPartRegexes);
         }
 
         [Fact]

@@ -15,7 +15,7 @@ namespace MediaBrowser.LocalMetadata.Parsers
         /// <summary>
         /// Initializes a new instance of the <see cref="BoxSetXmlParser"/> class.
         /// </summary>
-        /// <param name="logger">Instance of the <see cref="ILogger{BoxSetXmlParset}"/> interface.</param>
+        /// <param name="logger">Instance of the <see cref="ILogger{BoxSetXmlParser}"/> interface.</param>
         /// <param name="providerManager">Instance of the <see cref="IProviderManager"/> interface.</param>
         public BoxSetXmlParser(ILogger<BoxSetXmlParser> logger, IProviderManager providerManager)
             : base(logger, providerManager)
@@ -64,32 +64,32 @@ namespace MediaBrowser.LocalMetadata.Parsers
                     switch (reader.Name)
                     {
                         case "CollectionItem":
-                        {
-                            if (!reader.IsEmptyElement)
                             {
-                                using (var subReader = reader.ReadSubtree())
+                                if (!reader.IsEmptyElement)
                                 {
-                                    var child = GetLinkedChild(subReader);
-
-                                    if (child != null)
+                                    using (var subReader = reader.ReadSubtree())
                                     {
-                                        list.Add(child);
+                                        var child = GetLinkedChild(subReader);
+
+                                        if (child is not null)
+                                        {
+                                            list.Add(child);
+                                        }
                                     }
                                 }
-                            }
-                            else
-                            {
-                                reader.Read();
-                            }
+                                else
+                                {
+                                    reader.Read();
+                                }
 
-                            break;
-                        }
+                                break;
+                            }
 
                         default:
-                        {
-                            reader.Skip();
-                            break;
-                        }
+                            {
+                                reader.Skip();
+                                break;
+                            }
                     }
                 }
                 else

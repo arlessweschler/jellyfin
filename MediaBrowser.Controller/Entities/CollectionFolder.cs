@@ -3,6 +3,7 @@
 #pragma warning disable CS1591
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -10,7 +11,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using MediaBrowser.Common.Json;
+using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Extensions.Json;
 using MediaBrowser.Controller.IO;
 using MediaBrowser.Controller.Library;
 using MediaBrowser.Controller.Providers;
@@ -29,7 +32,7 @@ namespace MediaBrowser.Controller.Entities
     public class CollectionFolder : Folder, ICollectionFolder
     {
         private static readonly JsonSerializerOptions _jsonOptions = JsonDefaults.Options;
-        private static readonly Dictionary<string, LibraryOptions> _libraryOptions = new Dictionary<string, LibraryOptions>();
+        private static readonly ConcurrentDictionary<string, LibraryOptions> _libraryOptions = new ConcurrentDictionary<string, LibraryOptions>();
         private bool _requiresRefresh;
 
         /// <summary>
@@ -41,6 +44,28 @@ namespace MediaBrowser.Controller.Entities
             PhysicalFolderIds = Array.Empty<Guid>();
         }
 
+        /// <summary>
+        /// Event raised when library options are updated for any collection folder.
+        /// </summary>
+        public static event EventHandler<LibraryOptionsUpdatedEventArgs> LibraryOptionsUpdated;
+
+        /// <summary>
+        /// Gets the display preferences id.
+        /// </summary>
+        /// <remarks>
+        /// Allow different display preferences for each collection folder.
+        /// </remarks>
+        /// <value>The display prefs id.</value>
+        [JsonIgnore]
+        public override Guid DisplayPreferencesId => Id;
+
+        [JsonIgnore]
+        public override string[] PhysicalLocations => PhysicalLocationsList;
+
+        public string[] PhysicalLocationsList { get; set; }
+
+        public Guid[] PhysicalFolderIds { get; set; }
+
         public static IXmlSerializer XmlSerializer { get; set; }
 
         public static IServerApplicationHost ApplicationHost { get; set; }
@@ -51,17 +76,33 @@ namespace MediaBrowser.Controller.Entities
         [JsonIgnore]
         public override bool SupportsInheritedParentImages => false;
 
-        public string CollectionType { get; set; }
+        public CollectionType? CollectionType { get; set; }
 
         /// <summary>
-        /// Gets the item's children.
+        /// Gets or sets the item's children.
         /// </summary>
         /// <remarks>
         /// Our children are actually just references to the ones in the physical root...
+        /// Setting to null propagates invalidation to physical folders since the getter
+        /// always delegates to <see cref="GetActualChildren"/> and never reads the backing field.
         /// </remarks>
         /// <value>The actual children.</value>
         [JsonIgnore]
-        public override IEnumerable<BaseItem> Children => GetActualChildren();
+        public override IEnumerable<BaseItem> Children
+        {
+            get => GetActualChildren();
+            set
+            {
+                // The getter delegates to physical folders, so invalidate their caches.
+                foreach (var folder in GetPhysicalFolders(true))
+                {
+                    folder.Children = null;
+                }
+            }
+        }
+
+        [JsonIgnore]
+        public override bool SupportsPeople => false;
 
         public override bool CanDelete()
         {
@@ -73,12 +114,21 @@ namespace MediaBrowser.Controller.Entities
             return GetLibraryOptions(Path);
         }
 
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
+        {
+            if (GetLibraryOptions().Enabled)
+            {
+                return base.IsVisible(user, skipAllowedTagsCheck);
+            }
+
+            return false;
+        }
+
         private static LibraryOptions LoadLibraryOptions(string path)
         {
             try
             {
-                var result = XmlSerializer.DeserializeFromFile(typeof(LibraryOptions), GetLibraryOptionsPath(path)) as LibraryOptions;
-                if (result == null)
+                if (XmlSerializer.DeserializeFromFile(typeof(LibraryOptions), GetLibraryOptionsPath(path)) is not LibraryOptions result)
                 {
                     return new LibraryOptions();
                 }
@@ -120,62 +170,28 @@ namespace MediaBrowser.Controller.Entities
         }
 
         public static LibraryOptions GetLibraryOptions(string path)
-        {
-            lock (_libraryOptions)
-            {
-                if (!_libraryOptions.TryGetValue(path, out var options))
-                {
-                    options = LoadLibraryOptions(path);
-                    _libraryOptions[path] = options;
-                }
-
-                return options;
-            }
-        }
+            => _libraryOptions.GetOrAdd(path, LoadLibraryOptions);
 
         public static void SaveLibraryOptions(string path, LibraryOptions options)
         {
-            lock (_libraryOptions)
+            _libraryOptions[path] = options;
+
+            var clone = JsonSerializer.Deserialize<LibraryOptions>(JsonSerializer.SerializeToUtf8Bytes(options, _jsonOptions), _jsonOptions);
+            foreach (var mediaPath in clone.PathInfos)
             {
-                _libraryOptions[path] = options;
-
-                var clone = JsonSerializer.Deserialize<LibraryOptions>(JsonSerializer.SerializeToUtf8Bytes(options, _jsonOptions), _jsonOptions);
-                foreach (var mediaPath in clone.PathInfos)
+                if (!string.IsNullOrEmpty(mediaPath.Path))
                 {
-                    if (!string.IsNullOrEmpty(mediaPath.Path))
-                    {
-                        mediaPath.Path = ApplicationHost.ReverseVirtualPath(mediaPath.Path);
-                    }
+                    mediaPath.Path = ApplicationHost.ReverseVirtualPath(mediaPath.Path);
                 }
-
-                XmlSerializer.SerializeToFile(clone, GetLibraryOptionsPath(path));
             }
+
+            XmlSerializer.SerializeToFile(clone, GetLibraryOptionsPath(path));
+
+            LibraryOptionsUpdated?.Invoke(null, new LibraryOptionsUpdatedEventArgs(path, options));
         }
 
         public static void OnCollectionFolderChange()
-        {
-            lock (_libraryOptions)
-            {
-                _libraryOptions.Clear();
-            }
-        }
-
-        /// <summary>
-        /// Gets the display preferences id.
-        /// </summary>
-        /// <remarks>
-        /// Allow different display preferences for each collection folder.
-        /// </remarks>
-        /// <value>The display prefs id.</value>
-        [JsonIgnore]
-        public override Guid DisplayPreferencesId => Id;
-
-        [JsonIgnore]
-        public override string[] PhysicalLocations => PhysicalLocationsList;
-
-        public string[] PhysicalLocationsList { get; set; }
-
-        public Guid[] PhysicalFolderIds { get; set; }
+            => _libraryOptions.Clear();
 
         public override bool IsSaveLocalMetadataEnabled()
         {
@@ -286,7 +302,7 @@ namespace MediaBrowser.Controller.Entities
         {
             var path = ContainingFolderPath;
 
-            var args = new ItemResolveArgs(ConfigurationManager.ApplicationPaths, directoryService)
+            var args = new ItemResolveArgs(ConfigurationManager.ApplicationPaths, LibraryManager)
             {
                 FileInfo = FileSystem.GetDirectoryInfo(path),
                 Parent = GetParent() as Folder,
@@ -320,11 +336,12 @@ namespace MediaBrowser.Controller.Entities
         /// <param name="progress">The progress.</param>
         /// <param name="recursive">if set to <c>true</c> [recursive].</param>
         /// <param name="refreshChildMetadata">if set to <c>true</c> [refresh child metadata].</param>
+        /// <param name="allowRemoveRoot">remove item even this folder is root.</param>
         /// <param name="refreshOptions">The refresh options.</param>
         /// <param name="directoryService">The directory service.</param>
         /// <param name="cancellationToken">The cancellation token.</param>
         /// <returns>Task.</returns>
-        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
+        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
         }
@@ -353,8 +370,7 @@ namespace MediaBrowser.Controller.Entities
             return PhysicalLocations
                     .Where(i => !FileSystem.AreEqual(i, Path))
                     .SelectMany(i => GetPhysicalParents(i, rootChildren))
-                    .GroupBy(x => x.Id)
-                    .Select(x => x.First());
+                    .DistinctBy(x => x.Id);
         }
 
         private IEnumerable<Folder> GetPhysicalParents(string path, List<Folder> rootChildren)
@@ -373,8 +389,5 @@ namespace MediaBrowser.Controller.Entities
 
             return result;
         }
-
-        [JsonIgnore]
-        public override bool SupportsPeople => false;
     }
 }

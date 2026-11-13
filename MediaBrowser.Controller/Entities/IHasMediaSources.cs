@@ -20,8 +20,10 @@ namespace MediaBrowser.Controller.Entities
         /// <summary>
         /// Gets the media sources.
         /// </summary>
-        List<MediaSourceInfo> GetMediaSources(bool enablePathSubstitution);
+        /// <param name="enablePathSubstitution"><c>true</c> to enable path substitution, <c>false</c> to not.</param>
+        /// <returns>A list of media sources.</returns>
+        IReadOnlyList<MediaSourceInfo> GetMediaSources(bool enablePathSubstitution);
 
-        List<MediaStream> GetMediaStreams();
+        IReadOnlyList<MediaStream> GetMediaStreams();
     }
 }

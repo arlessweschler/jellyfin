@@ -1,7 +1,7 @@
-﻿using System;
+using System;
 using System.Globalization;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Events;
@@ -37,7 +37,7 @@ namespace Jellyfin.Server.Implementations.Events.Consumers.Library
             await _activityManager.CreateAsync(new ActivityLog(
                 string.Format(
                     CultureInfo.InvariantCulture,
-                    _localizationManager.GetLocalizedString("SubtitleDownloadFailureFromForItem"),
+                    _localizationManager.GetServerLocalizedString("SubtitleDownloadFailureFromForItem"),
                     eventArgs.Provider,
                     GetItemName(eventArgs.Item)),
                 "SubtitleDownloadFailure",

@@ -4,50 +4,48 @@
 
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Data;
 using Jellyfin.Data.Enums;
+using Jellyfin.Database.Implementations.Entities;
+using Jellyfin.Database.Implementations.Enums;
 using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Audio;
 using MediaBrowser.Controller.Providers;
-using MediaBrowser.Model.Querying;
+using MediaBrowser.Model.Entities;
 
 namespace MediaBrowser.Controller.Playlists
 {
     public class Playlist : Folder, IHasShares
     {
-        public static readonly IReadOnlyList<string> SupportedExtensions = new[]
-        {
+        public static readonly IReadOnlyList<string> SupportedExtensions =
+        [
             ".m3u",
             ".m3u8",
             ".pls",
             ".wpl",
             ".zpl"
-        };
-
-        public Guid OwnerUserId { get; set; }
-
-        public Share[] Shares { get; set; }
+        ];
 
         public Playlist()
         {
-            Shares = Array.Empty<Share>();
+            Shares = [];
+            OpenAccess = false;
         }
+
+        public Guid OwnerUserId { get; set; }
+
+        public bool OpenAccess { get; set; }
+
+        public IReadOnlyList<PlaylistUserPermissions> Shares { get; set; }
 
         [JsonIgnore]
         public bool IsFile => IsPlaylistFile(Path);
-
-        public static bool IsPlaylistFile(string path)
-        {
-            // The path will sometimes be a directory and "Path.HasExtension" returns true if the name contains a '.' (dot).
-            return System.IO.Path.HasExtension(path) && !Directory.Exists(path);
-        }
 
         [JsonIgnore]
         public override string ContainingFolderPath
@@ -72,13 +70,48 @@ namespace MediaBrowser.Controller.Playlists
         public override bool SupportsInheritedParentImages => false;
 
         [JsonIgnore]
-        public override bool SupportsPlayedStatus => string.Equals(MediaType, "Video", StringComparison.OrdinalIgnoreCase);
+        public override bool SupportsPlayedStatus => MediaType == Jellyfin.Data.Enums.MediaType.Video;
 
         [JsonIgnore]
         public override bool AlwaysScanInternalMetadataPath => true;
 
         [JsonIgnore]
         public override bool SupportsCumulativeRunTimeTicks => true;
+
+        [JsonIgnore]
+        public override bool IsPreSorted => true;
+
+        public MediaType PlaylistMediaType { get; set; }
+
+        [JsonIgnore]
+        public override MediaType MediaType => PlaylistMediaType;
+
+        [JsonIgnore]
+        private bool IsSharedItem
+        {
+            get
+            {
+                var path = Path;
+
+                if (string.IsNullOrEmpty(path))
+                {
+                    return false;
+                }
+
+                return FileSystem.ContainsSubPath(ConfigurationManager.ApplicationPaths.DataPath, path);
+            }
+        }
+
+        public static bool IsPlaylistFile(string path)
+        {
+            // The path will sometimes be a directory and "Path.HasExtension" returns true if the name contains a '.' (dot).
+            return System.IO.Path.HasExtension(path) && !Directory.Exists(path);
+        }
+
+        public void SetMediaType(MediaType? value)
+        {
+            PlaylistMediaType = value ?? MediaType.Unknown;
+        }
 
         public override double GetDefaultPrimaryImageAspectRatio()
         {
@@ -98,35 +131,37 @@ namespace MediaBrowser.Controller.Playlists
         protected override List<BaseItem> LoadChildren()
         {
             // Save a trip to the database
-            return new List<BaseItem>();
+            return [];
         }
 
-        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
+        protected override Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
         }
 
-        public override List<BaseItem> GetChildren(User user, bool includeLinkedChildren, InternalItemsQuery query)
+        public override IReadOnlyList<BaseItem> GetChildren(User user, bool includeLinkedChildren, InternalItemsQuery query)
         {
             return GetPlayableItems(user, query);
         }
 
-        protected override IEnumerable<BaseItem> GetNonCachedChildren(IDirectoryService directoryService)
+        protected override IReadOnlyList<BaseItem> GetNonCachedChildren(IDirectoryService directoryService)
         {
-            return new List<BaseItem>();
+            return [];
         }
 
-        public override IEnumerable<BaseItem> GetRecursiveChildren(User user, InternalItemsQuery query)
+        public override IReadOnlyList<BaseItem> GetRecursiveChildren(User user, InternalItemsQuery query, out int totalCount)
         {
-            return GetPlayableItems(user, query);
+            var items = GetPlayableItems(user, query);
+            totalCount = items.Count;
+            return items;
         }
 
-        public IEnumerable<Tuple<LinkedChild, BaseItem>> GetManageableItems()
+        public IReadOnlyList<Tuple<LinkedChild, BaseItem>> GetManageableItems()
         {
             return GetLinkedChildrenInfos();
         }
 
-        private List<BaseItem> GetPlayableItems(User user, InternalItemsQuery query)
+        private IReadOnlyList<BaseItem> GetPlayableItems(User user, InternalItemsQuery query)
         {
             query ??= new InternalItemsQuery(user);
 
@@ -135,9 +170,9 @@ namespace MediaBrowser.Controller.Playlists
             return base.GetChildren(user, true, query);
         }
 
-        public static List<BaseItem> GetPlaylistItems(string playlistMediaType, IEnumerable<BaseItem> inputItems, User user, DtoOptions options)
+        public static IReadOnlyList<BaseItem> GetPlaylistItems(IEnumerable<BaseItem> inputItems, User user, DtoOptions options)
         {
-            if (user != null)
+            if (user is not null)
             {
                 inputItems = inputItems.Where(i => i.IsVisible(user));
             }
@@ -146,23 +181,23 @@ namespace MediaBrowser.Controller.Playlists
 
             foreach (var item in inputItems)
             {
-                var playlistItems = GetPlaylistItems(item, user, playlistMediaType, options);
+                var playlistItems = GetPlaylistItems(item, user, options);
                 list.AddRange(playlistItems);
             }
 
             return list;
         }
 
-        private static IEnumerable<BaseItem> GetPlaylistItems(BaseItem item, User user, string mediaType, DtoOptions options)
+        private static IEnumerable<BaseItem> GetPlaylistItems(BaseItem item, User user, DtoOptions options)
         {
             if (item is MusicGenre musicGenre)
             {
                 return LibraryManager.GetItemList(new InternalItemsQuery(user)
                 {
                     Recursive = true,
-                    IncludeItemTypes = new[] { nameof(Audio) },
-                    GenreIds = new[] { musicGenre.Id },
-                    OrderBy = new[] { (ItemSortBy.AlbumArtist, SortOrder.Ascending), (ItemSortBy.Album, SortOrder.Ascending), (ItemSortBy.SortName, SortOrder.Ascending) },
+                    IncludeItemTypes = [BaseItemKind.Audio],
+                    GenreIds = [musicGenre.Id],
+                    OrderBy = [(ItemSortBy.AlbumArtist, SortOrder.Ascending), (ItemSortBy.Album, SortOrder.Ascending), (ItemSortBy.SortName, SortOrder.Ascending)],
                     DtoOptions = options
                 });
             }
@@ -172,9 +207,9 @@ namespace MediaBrowser.Controller.Playlists
                 return LibraryManager.GetItemList(new InternalItemsQuery(user)
                 {
                     Recursive = true,
-                    IncludeItemTypes = new[] { nameof(Audio) },
-                    ArtistIds = new[] { musicArtist.Id },
-                    OrderBy = new[] { (ItemSortBy.AlbumArtist, SortOrder.Ascending), (ItemSortBy.Album, SortOrder.Ascending), (ItemSortBy.SortName, SortOrder.Ascending) },
+                    IncludeItemTypes = [BaseItemKind.Audio],
+                    ArtistIds = [musicArtist.Id],
+                    OrderBy = [(ItemSortBy.AlbumArtist, SortOrder.Ascending), (ItemSortBy.Album, SortOrder.Ascending), (ItemSortBy.SortName, SortOrder.Ascending)],
                     DtoOptions = options
                 });
             }
@@ -185,8 +220,7 @@ namespace MediaBrowser.Controller.Playlists
                 {
                     Recursive = true,
                     IsFolder = false,
-                    OrderBy = new[] { (ItemSortBy.SortName, SortOrder.Ascending) },
-                    MediaTypes = new[] { mediaType },
+                    MediaTypes = [MediaType.Audio, MediaType.Video],
                     EnableTotalRecordCount = false,
                     DtoOptions = options
                 };
@@ -194,58 +228,51 @@ namespace MediaBrowser.Controller.Playlists
                 return folder.GetItemList(query);
             }
 
-            return new[] { item };
+            return [item];
         }
 
-        [JsonIgnore]
-        public override bool IsPreSorted => true;
-
-        public string PlaylistMediaType { get; set; }
-
-        [JsonIgnore]
-        public override string MediaType => PlaylistMediaType;
-
-        public void SetMediaType(string value)
-        {
-            PlaylistMediaType = value;
-        }
-
-        [JsonIgnore]
-        private bool IsSharedItem
-        {
-            get
-            {
-                var path = Path;
-
-                if (string.IsNullOrEmpty(path))
-                {
-                    return false;
-                }
-
-                return FileSystem.ContainsSubPath(ConfigurationManager.ApplicationPaths.DataPath, path);
-            }
-        }
-
-        public override bool IsVisible(User user)
+        public override bool IsVisible(User user, bool skipAllowedTagsCheck = false)
         {
             if (!IsSharedItem)
             {
-                return base.IsVisible(user);
+                return base.IsVisible(user, skipAllowedTagsCheck) && HasParentalAllowedChild(user);
             }
 
-            if (user.Id == OwnerUserId)
+            if (OpenAccess)
+            {
+                return HasParentalAllowedChild(user);
+            }
+
+            var userId = user.Id;
+            if (userId.Equals(OwnerUserId))
+            {
+                return HasParentalAllowedChild(user);
+            }
+
+            var shares = Shares;
+            if (shares.Count == 0)
+            {
+                return false;
+            }
+
+            return shares.Any(s => s.UserId.Equals(userId)) && HasParentalAllowedChild(user);
+        }
+
+        private bool HasParentalAllowedChild(User user)
+        {
+            if (!user.MaxParentalRatingScore.HasValue)
             {
                 return true;
             }
 
-            var shares = Shares;
-            if (shares.Length == 0)
-            {
-                return base.IsVisible(user);
-            }
+            var linkedItems = GetLinkedChildren();
 
-            var userId = user.Id.ToString("N", CultureInfo.InvariantCulture);
-            return shares.Any(share => string.Equals(share.UserId, userId, StringComparison.OrdinalIgnoreCase));
+            return linkedItems.Count == 0 || linkedItems.Any(child => child.IsParentalAllowed(user, true));
+        }
+
+        public override bool CanDelete(User user)
+        {
+            return user.HasPermission(PermissionKind.IsAdministrator) || user.Id.Equals(OwnerUserId);
         }
 
         public override bool IsVisibleStandalone(User user)

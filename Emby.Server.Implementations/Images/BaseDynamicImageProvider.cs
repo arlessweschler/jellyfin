@@ -7,6 +7,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Mime;
 using System.Threading;
 using System.Threading.Tasks;
 using MediaBrowser.Common.Configuration;
@@ -42,16 +43,14 @@ namespace Emby.Server.Implementations.Images
         protected IImageProcessor ImageProcessor { get; set; }
 
         protected virtual IReadOnlyCollection<ImageType> SupportedImages { get; }
-            = new ImageType[] { ImageType.Primary };
+            = [ImageType.Primary];
 
         /// <inheritdoc />
         public string Name => "Dynamic Image Provider";
 
-        protected virtual int MaxImageAgeDays => 7;
-
         public int Order => 0;
 
-        protected virtual bool Supports(BaseItem _) => true;
+        protected virtual bool Supports(BaseItem item) => true;
 
         public async Task<ItemUpdateType> FetchAsync(T item, MetadataRefreshOptions options, CancellationToken cancellationToken)
         {
@@ -65,13 +64,13 @@ namespace Emby.Server.Implementations.Images
             if (SupportedImages.Contains(ImageType.Primary))
             {
                 var primaryResult = await FetchAsync(item, ImageType.Primary, options, cancellationToken).ConfigureAwait(false);
-                updateType = updateType | primaryResult;
+                updateType |= primaryResult;
             }
 
             if (SupportedImages.Contains(ImageType.Thumb))
             {
                 var thumbResult = await FetchAsync(item, ImageType.Thumb, options, cancellationToken).ConfigureAwait(false);
-                updateType = updateType | thumbResult;
+                updateType |= thumbResult;
             }
 
             return updateType;
@@ -81,7 +80,7 @@ namespace Emby.Server.Implementations.Images
         {
             var image = item.GetImageInfo(imageType, 0);
 
-            if (image != null)
+            if (image is not null)
             {
                 if (!image.IsLocalFile)
                 {
@@ -116,9 +115,9 @@ namespace Emby.Server.Implementations.Images
 
             var mimeType = MimeTypes.GetMimeType(outputPath);
 
-            if (string.Equals(mimeType, "application/octet-stream", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(mimeType, MediaTypeNames.Application.Octet, StringComparison.OrdinalIgnoreCase))
             {
-                mimeType = "image/png";
+                mimeType = MediaTypeNames.Image.Png;
             }
 
             await ProviderManager.SaveImage(item, outputPath, mimeType, imageType, null, false, cancellationToken).ConfigureAwait(false);
@@ -135,7 +134,7 @@ namespace Emby.Server.Implementations.Images
 
         protected virtual IEnumerable<string> GetStripCollageImagePaths(BaseItem primaryItem, IEnumerable<BaseItem> items)
         {
-            var useBackdrop = primaryItem is CollectionFolder;
+            var useBackdrop = primaryItem is CollectionFolder || primaryItem is UserView;
             return items
                 .Select(i =>
                 {
@@ -143,20 +142,20 @@ namespace Emby.Server.Implementations.Images
                     if (useBackdrop)
                     {
                         var backdrop = i.GetImageInfo(ImageType.Backdrop, 0);
-                        if (backdrop != null && backdrop.IsLocalFile)
+                        if (backdrop is not null && backdrop.IsLocalFile)
                         {
                             return backdrop.Path;
                         }
                     }
 
                     var image = i.GetImageInfo(ImageType.Primary, 0);
-                    if (image != null && image.IsLocalFile)
+                    if (image is not null && image.IsLocalFile)
                     {
                         return image.Path;
                     }
 
                     image = i.GetImageInfo(ImageType.Thumb, 0);
-                    if (image != null && image.IsLocalFile)
+                    if (image is not null && image.IsLocalFile)
                     {
                         return image.Path;
                     }
@@ -268,22 +267,24 @@ namespace Emby.Server.Implementations.Images
         {
             var image = item.GetImageInfo(type, 0);
 
-            if (image != null)
+            if (image is null)
             {
-                if (!image.IsLocalFile)
-                {
-                    return false;
-                }
+                return GetItemsWithImages(item).Count is not 0;
+            }
 
-                if (!FileSystem.ContainsSubPath(item.GetInternalMetadataPath(), image.Path))
-                {
-                    return false;
-                }
+            if (!image.IsLocalFile)
+            {
+                return false;
+            }
 
-                if (!HasChangedByDate(item, image))
-                {
-                    return false;
-                }
+            if (!FileSystem.ContainsSubPath(item.GetInternalMetadataPath(), image.Path))
+            {
+                return false;
+            }
+
+            if (!HasChangedByDate(item, image))
+            {
+                return false;
             }
 
             return true;
@@ -291,8 +292,14 @@ namespace Emby.Server.Implementations.Images
 
         protected virtual bool HasChangedByDate(BaseItem item, ItemImageInfo image)
         {
-            var age = DateTime.UtcNow - image.DateModified;
-            return age.TotalDays > MaxImageAgeDays;
+            var path = image.Path;
+            if (!string.IsNullOrEmpty(path))
+            {
+                var modificationDate = FileSystem.GetLastWriteTimeUtc(path);
+                return image.DateModified != modificationDate;
+            }
+
+            return false;
         }
 
         protected string CreateSingleImage(IEnumerable<BaseItem> itemsWithImages, string outputPathWithoutExtension, ImageType imageType)

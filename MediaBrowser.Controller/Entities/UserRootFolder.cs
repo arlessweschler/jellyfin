@@ -8,7 +8,7 @@ using System.Linq;
 using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
-using Jellyfin.Data.Entities;
+using Jellyfin.Database.Implementations.Entities;
 using MediaBrowser.Controller.Providers;
 using MediaBrowser.Model.Library;
 using MediaBrowser.Model.Querying;
@@ -21,22 +21,15 @@ namespace MediaBrowser.Controller.Entities
     /// </summary>
     public class UserRootFolder : Folder
     {
+        private readonly Lock _childIdsLock = new();
         private List<Guid> _childrenIds = null;
-        private readonly object _childIdsLock = new object();
 
-        protected override List<BaseItem> LoadChildren()
+        /// <summary>
+        /// Initializes a new instance of the <see cref="UserRootFolder"/> class.
+        /// </summary>
+        public UserRootFolder()
         {
-            lock (_childIdsLock)
-            {
-                if (_childrenIds == null)
-                {
-                    var list = base.LoadChildren();
-                    _childrenIds = list.Select(i => i.Id).ToList();
-                    return list;
-                }
-
-                return _childrenIds.Select(LibraryManager.GetItemById).Where(i => i != null).ToList();
-            }
+            IsRoot = true;
         }
 
         [JsonIgnore]
@@ -44,6 +37,12 @@ namespace MediaBrowser.Controller.Entities
 
         [JsonIgnore]
         public override bool SupportsPlayedStatus => false;
+
+        [JsonIgnore]
+        protected override bool SupportsShortcutChildren => true;
+
+        [JsonIgnore]
+        public override bool IsPreSorted => true;
 
         private void ClearCache()
         {
@@ -53,32 +52,47 @@ namespace MediaBrowser.Controller.Entities
             }
         }
 
+        protected override IReadOnlyList<BaseItem> LoadChildren()
+        {
+            lock (_childIdsLock)
+            {
+                if (_childrenIds is null)
+                {
+                    var list = base.LoadChildren();
+                    _childrenIds = list.Select(i => i.Id).ToList();
+                    return list;
+                }
+
+                return _childrenIds.Select(LibraryManager.GetItemById).Where(i => i is not null).ToList();
+            }
+        }
+
         protected override QueryResult<BaseItem> GetItemsInternal(InternalItemsQuery query)
         {
-            if (query.Recursive)
+            // The user root holds no items of its own - a plain listing returns the user's
+            // views. But a request carrying any filter is a search across the libraries, so
+            // resolve it through the recursive query path even when Recursive wasn't set;
+            // otherwise the filters would be silently dropped. Recursive is set so the
+            // downstream query (ancestor/top-parent scoping) treats it as a recursive search.
+            if (query.Recursive || query.HasFilters)
             {
+                query.Recursive = true;
                 return QueryRecursive(query);
             }
 
             var result = UserViewManager.GetUserViews(new UserViewQuery
             {
-                UserId = query.User.Id,
+                User = query.User,
                 PresetViews = query.PresetViews
             });
 
-            return UserViewBuilder.SortAndPage(result, null, query, LibraryManager, true);
+            return UserViewBuilder.SortAndPage(result, null, query, LibraryManager);
         }
 
         public override int GetChildCount(User user)
         {
             return GetChildren(user, true).Count;
         }
-
-        [JsonIgnore]
-        protected override bool SupportsShortcutChildren => true;
-
-        [JsonIgnore]
-        public override bool IsPreSorted => true;
 
         protected override IEnumerable<BaseItem> GetEligibleChildrenForRecursiveChildren(User user)
         {
@@ -109,11 +123,11 @@ namespace MediaBrowser.Controller.Entities
             return base.GetNonCachedChildren(directoryService);
         }
 
-        protected override async Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
+        protected override async Task ValidateChildrenInternal(IProgress<double> progress, bool recursive, bool refreshChildMetadata, bool allowRemoveRoot, MetadataRefreshOptions refreshOptions, IDirectoryService directoryService, CancellationToken cancellationToken)
         {
             ClearCache();
 
-            await base.ValidateChildrenInternal(progress, recursive, refreshChildMetadata, refreshOptions, directoryService, cancellationToken)
+            await base.ValidateChildrenInternal(progress, recursive, refreshChildMetadata, allowRemoveRoot, refreshOptions, directoryService, cancellationToken)
                 .ConfigureAwait(false);
 
             ClearCache();

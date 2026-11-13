@@ -1,8 +1,8 @@
 using System.IO;
 using System.Reflection;
 using System.Threading.Tasks;
+using MediaBrowser.Model.IO;
 using Xunit;
-using Xunit.Abstractions;
 
 namespace Jellyfin.Server.Integration.Tests
 {
@@ -24,17 +24,17 @@ namespace Jellyfin.Server.Integration.Tests
             var client = _factory.CreateClient();
 
             // Act
-            var response = await client.GetAsync("/api-docs/openapi.json");
+            var response = await client.GetAsync("/api-docs/openapi.json", TestContext.Current.CancellationToken);
 
             // Assert
             response.EnsureSuccessStatusCode();
             Assert.Equal("application/json; charset=utf-8", response.Content.Headers.ContentType?.ToString());
 
             // Write out for publishing
-            var responseBody = await response.Content.ReadAsStringAsync();
             string outputPath = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? ".", "openapi.json"));
             _outputHelper.WriteLine("Writing OpenAPI Spec JSON to '{0}'.", outputPath);
-            File.WriteAllText(outputPath, responseBody);
+            await using var fs = AsyncFile.Create(outputPath);
+            await response.Content.CopyToAsync(fs, TestContext.Current.CancellationToken);
         }
     }
 }

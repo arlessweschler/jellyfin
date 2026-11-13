@@ -1,11 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Xml;
 using MediaBrowser.Controller.Configuration;
+using MediaBrowser.Controller.Dto;
 using MediaBrowser.Controller.Entities;
 using MediaBrowser.Controller.Entities.Movies;
 using MediaBrowser.Controller.Entities.TV;
@@ -21,28 +24,17 @@ namespace MediaBrowser.LocalMetadata.Savers
     public abstract class BaseXmlSaver : IMetadataFileSaver
     {
         /// <summary>
-        /// Gets the date added format.
-        /// </summary>
-        public const string DateAddedFormat = "yyyy-MM-dd HH:mm:ss";
-
-        private static readonly CultureInfo _usCulture = new CultureInfo("en-US");
-
-        /// <summary>
         /// Initializes a new instance of the <see cref="BaseXmlSaver"/> class.
         /// </summary>
         /// <param name="fileSystem">Instance of the <see cref="IFileSystem"/> interface.</param>
         /// <param name="configurationManager">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
         /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
-        /// <param name="userManager">Instance of the <see cref="IUserManager"/> interface.</param>
-        /// <param name="userDataManager">Instance of the <see cref="IUserDataManager"/> interface.</param>
         /// <param name="logger">Instance of the <see cref="ILogger{BaseXmlSaver}"/> interface.</param>
-        protected BaseXmlSaver(IFileSystem fileSystem, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, IUserManager userManager, IUserDataManager userDataManager, ILogger<BaseXmlSaver> logger)
+        protected BaseXmlSaver(IFileSystem fileSystem, IServerConfigurationManager configurationManager, ILibraryManager libraryManager, ILogger<BaseXmlSaver> logger)
         {
             FileSystem = fileSystem;
             ConfigurationManager = configurationManager;
             LibraryManager = libraryManager;
-            UserManager = userManager;
-            UserDataManager = userDataManager;
             Logger = logger;
         }
 
@@ -60,16 +52,6 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// Gets the library manager.
         /// </summary>
         protected ILibraryManager LibraryManager { get; private set; }
-
-        /// <summary>
-        /// Gets the user manager.
-        /// </summary>
-        protected IUserManager UserManager { get; private set; }
-
-        /// <summary>
-        /// Gets the user data manager.
-        /// </summary>
-        protected IUserDataManager UserDataManager { get; private set; }
 
         /// <summary>
         /// Gets the logger.
@@ -98,9 +80,7 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// <param name="item">The item.</param>
         /// <returns>System.String.</returns>
         protected virtual string GetRootElementName(BaseItem item)
-        {
-            return "Item";
-        }
+            => "Item";
 
         /// <summary>
         /// Determines whether [is enabled for] [the specified item].
@@ -111,31 +91,54 @@ namespace MediaBrowser.LocalMetadata.Savers
         public abstract bool IsEnabledFor(BaseItem item, ItemUpdateType updateType);
 
         /// <inheritdoc />
-        public void Save(BaseItem item, CancellationToken cancellationToken)
+        public async Task SaveAsync(BaseItem item, CancellationToken cancellationToken)
         {
             var path = GetSavePath(item);
-
-            using var memoryStream = new MemoryStream();
-            Save(item, memoryStream);
-
-            memoryStream.Position = 0;
-
-            cancellationToken.ThrowIfCancellationRequested();
-
-            SaveToFile(memoryStream, path);
-        }
-
-        private void SaveToFile(Stream stream, string path)
-        {
-            var directory = Path.GetDirectoryName(path) ?? throw new ArgumentException($"Provided path ({path}) is not valid.", nameof(path));
+            var directory = Path.GetDirectoryName(path) ?? throw new InvalidDataException($"Provided path ({path}) is not valid.");
             Directory.CreateDirectory(directory);
-            // On Windows, savint the file will fail if the file is hidden or readonly
+
+            // On Windows, saving the file will fail if the file is hidden or readonly
             FileSystem.SetAttributes(path, false, false);
 
-            // use FileShare.None as this bypasses dotnet bug dotnet/runtime#42790 .
-            using (var filestream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+            var fileStreamOptions = new FileStreamOptions()
             {
-                stream.CopyTo(filestream);
+                Mode = FileMode.Create,
+                Access = FileAccess.Write,
+                Share = FileShare.None
+            };
+
+            var filestream = new FileStream(path, fileStreamOptions);
+            await using (filestream.ConfigureAwait(false))
+            {
+                var settings = new XmlWriterSettings
+                {
+                    Indent = true,
+                    Encoding = Encoding.UTF8,
+                    Async = true
+                };
+
+                var writer = XmlWriter.Create(filestream, settings);
+                await using (writer.ConfigureAwait(false))
+                {
+                    var root = GetRootElementName(item);
+
+                    await writer.WriteStartDocumentAsync(true).ConfigureAwait(false);
+
+                    await writer.WriteStartElementAsync(null, root, null).ConfigureAwait(false);
+
+                    var baseItem = item;
+
+                    if (baseItem is not null)
+                    {
+                        await AddCommonNodesAsync(baseItem, writer).ConfigureAwait(false);
+                    }
+
+                    await WriteCustomElementsAsync(item, writer).ConfigureAwait(false);
+
+                    await writer.WriteEndElementAsync().ConfigureAwait(false);
+
+                    await writer.WriteEndDocumentAsync().ConfigureAwait(false);
+                }
             }
 
             if (ConfigurationManager.Configuration.SaveMetadataHidden)
@@ -152,39 +155,7 @@ namespace MediaBrowser.LocalMetadata.Savers
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "Error setting hidden attribute on {path}", path);
-            }
-        }
-
-        private void Save(BaseItem item, Stream stream)
-        {
-            var settings = new XmlWriterSettings
-            {
-                Indent = true,
-                Encoding = Encoding.UTF8,
-                CloseOutput = false
-            };
-
-            using (var writer = XmlWriter.Create(stream, settings))
-            {
-                var root = GetRootElementName(item);
-
-                writer.WriteStartDocument(true);
-
-                writer.WriteStartElement(root);
-
-                var baseItem = item;
-
-                if (baseItem != null)
-                {
-                    AddCommonNodes(baseItem, writer, LibraryManager);
-                }
-
-                WriteCustomElements(item, writer);
-
-                writer.WriteEndElement();
-
-                writer.WriteEndDocument();
+                Logger.LogError(ex, "Error setting hidden attribute on {Path}", path);
             }
         }
 
@@ -193,70 +164,71 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// </summary>
         /// <param name="item">The item.</param>
         /// <param name="writer">The xml writer.</param>
-        protected abstract void WriteCustomElements(BaseItem item, XmlWriter writer);
+        /// <returns>The task object representing the asynchronous operation.</returns>
+        protected abstract Task WriteCustomElementsAsync(BaseItem item, XmlWriter writer);
 
         /// <summary>
         /// Adds the common nodes.
         /// </summary>
         /// <param name="item">The item.</param>
         /// <param name="writer">The xml writer.</param>
-        /// <param name="libraryManager">Instance of the <see cref="ILibraryManager"/> interface.</param>
-        public static void AddCommonNodes(BaseItem item, XmlWriter writer, ILibraryManager libraryManager)
+        /// <returns>The task object representing the asynchronous operation.</returns>
+        private async Task AddCommonNodesAsync(BaseItem item, XmlWriter writer)
         {
             if (!string.IsNullOrEmpty(item.OfficialRating))
             {
-                writer.WriteElementString("ContentRating", item.OfficialRating);
+                await writer.WriteElementStringAsync(null, "ContentRating", null, item.OfficialRating).ConfigureAwait(false);
             }
 
-            writer.WriteElementString("Added", item.DateCreated.ToLocalTime().ToString("G", CultureInfo.InvariantCulture));
+            await writer.WriteElementStringAsync(null, "Added", null, item.DateCreated.ToLocalTime().ToString("G", CultureInfo.InvariantCulture)).ConfigureAwait(false);
 
-            writer.WriteElementString("LockData", item.IsLocked.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
+            await writer.WriteElementStringAsync(null, "LockData", null, item.IsLocked.ToString(CultureInfo.InvariantCulture).ToLowerInvariant()).ConfigureAwait(false);
 
             if (item.LockedFields.Length > 0)
             {
-                writer.WriteElementString("LockedFields", string.Join('|', item.LockedFields));
+                await writer.WriteElementStringAsync(null, "LockedFields", null, string.Join('|', item.LockedFields)).ConfigureAwait(false);
             }
 
             if (item.CriticRating.HasValue)
             {
-                writer.WriteElementString("CriticRating", item.CriticRating.Value.ToString(_usCulture));
+                await writer.WriteElementStringAsync(null, "CriticRating", null, item.CriticRating.Value.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrEmpty(item.Overview))
             {
-                writer.WriteElementString("Overview", item.Overview);
+                await writer.WriteElementStringAsync(null, "Overview", null, item.Overview).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrEmpty(item.OriginalTitle))
             {
-                writer.WriteElementString("OriginalTitle", item.OriginalTitle);
+                await writer.WriteElementStringAsync(null, "OriginalTitle", null, item.OriginalTitle).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrEmpty(item.CustomRating))
             {
-                writer.WriteElementString("CustomRating", item.CustomRating);
+                await writer.WriteElementStringAsync(null, "CustomRating", null, item.CustomRating).ConfigureAwait(false);
             }
 
-            if (!string.IsNullOrEmpty(item.Name) && !(item is Episode))
+            if (!string.IsNullOrEmpty(item.Name) && item is not Episode)
             {
-                writer.WriteElementString("LocalTitle", item.Name);
+                await writer.WriteElementStringAsync(null, "LocalTitle", null, item.Name).ConfigureAwait(false);
             }
 
             var forcedSortName = item.ForcedSortName;
             if (!string.IsNullOrEmpty(forcedSortName))
             {
-                writer.WriteElementString("SortTitle", forcedSortName);
+                await writer.WriteElementStringAsync(null, "SortTitle", null, forcedSortName).ConfigureAwait(false);
             }
 
             if (item.PremiereDate.HasValue)
             {
                 if (item is Person)
                 {
-                    writer.WriteElementString("BirthDate", item.PremiereDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                    await writer.WriteElementStringAsync(null, "BirthDate", null, item.PremiereDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ConfigureAwait(false);
                 }
-                else if (!(item is Episode))
+                else if (item is not Episode)
                 {
-                    writer.WriteElementString("PremiereDate", item.PremiereDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                    await writer.WriteElementStringAsync(null, "PremiereDate", null, item.PremiereDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ConfigureAwait(false);
                 }
             }
 
@@ -264,69 +236,69 @@ namespace MediaBrowser.LocalMetadata.Savers
             {
                 if (item is Person)
                 {
-                    writer.WriteElementString("DeathDate", item.EndDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                    await writer.WriteElementStringAsync(null, "DeathDate", null, item.EndDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ConfigureAwait(false);
                 }
-                else if (!(item is Episode))
+                else if (item is not Episode)
                 {
-                    writer.WriteElementString("EndDate", item.EndDate.Value.ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture));
+                    await writer.WriteElementStringAsync(null, "EndDate", null, item.EndDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)).ConfigureAwait(false);
                 }
             }
 
             if (item.RemoteTrailers.Count > 0)
             {
-                writer.WriteStartElement("Trailers");
+                await writer.WriteStartElementAsync(null, "Trailers", null).ConfigureAwait(false);
 
                 foreach (var trailer in item.RemoteTrailers)
                 {
-                    writer.WriteElementString("Trailer", trailer.Url);
+                    await writer.WriteElementStringAsync(null, "Trailer", null, trailer.Url).ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item.ProductionLocations.Length > 0)
             {
-                writer.WriteStartElement("Countries");
+                await writer.WriteStartElementAsync(null, "Countries", null).ConfigureAwait(false);
 
                 foreach (var name in item.ProductionLocations)
                 {
-                    writer.WriteElementString("Country", name);
+                    await writer.WriteElementStringAsync(null, "Country", null, name).ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item is IHasDisplayOrder hasDisplayOrder && !string.IsNullOrEmpty(hasDisplayOrder.DisplayOrder))
             {
-                writer.WriteElementString("DisplayOrder", hasDisplayOrder.DisplayOrder);
+                await writer.WriteElementStringAsync(null, "DisplayOrder", null, hasDisplayOrder.DisplayOrder).ConfigureAwait(false);
             }
 
             if (item.CommunityRating.HasValue)
             {
-                writer.WriteElementString("Rating", item.CommunityRating.Value.ToString(_usCulture));
+                await writer.WriteElementStringAsync(null, "Rating", null, item.CommunityRating.Value.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
             }
 
-            if (item.ProductionYear.HasValue && !(item is Person))
+            if (item.ProductionYear is not null && item is not Person)
             {
-                writer.WriteElementString("ProductionYear", item.ProductionYear.Value.ToString(_usCulture));
+                await writer.WriteElementStringAsync(null, "ProductionYear", null, item.ProductionYear.Value.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
             }
 
             if (item is IHasAspectRatio hasAspectRatio)
             {
                 if (!string.IsNullOrEmpty(hasAspectRatio.AspectRatio))
                 {
-                    writer.WriteElementString("AspectRatio", hasAspectRatio.AspectRatio);
+                    await writer.WriteElementStringAsync(null, "AspectRatio", null, hasAspectRatio.AspectRatio).ConfigureAwait(false);
                 }
             }
 
             if (!string.IsNullOrEmpty(item.PreferredMetadataLanguage))
             {
-                writer.WriteElementString("Language", item.PreferredMetadataLanguage);
+                await writer.WriteElementStringAsync(null, "Language", null, item.PreferredMetadataLanguage).ConfigureAwait(false);
             }
 
             if (!string.IsNullOrEmpty(item.PreferredMetadataCountryCode))
             {
-                writer.WriteElementString("CountryCode", item.PreferredMetadataCountryCode);
+                await writer.WriteElementStringAsync(null, "CountryCode", null, item.PreferredMetadataCountryCode).ConfigureAwait(false);
             }
 
             // Use original runtime here, actual file runtime later in MediaInfo
@@ -334,106 +306,107 @@ namespace MediaBrowser.LocalMetadata.Savers
 
             if (runTimeTicks.HasValue)
             {
-                var timespan = TimeSpan.FromTicks(runTimeTicks!.Value);
+                var timespan = TimeSpan.FromTicks(runTimeTicks.Value);
 
-                writer.WriteElementString("RunningTime", Math.Floor(timespan.TotalMinutes).ToString(_usCulture));
+                await writer.WriteElementStringAsync(null, "RunningTime", null, Math.Floor(timespan.TotalMinutes).ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
             }
 
-            if (item.ProviderIds != null)
+            if (item.ProviderIds is not null)
             {
                 foreach (var providerKey in item.ProviderIds.Keys)
                 {
                     var providerId = item.ProviderIds[providerKey];
                     if (!string.IsNullOrEmpty(providerId))
                     {
-                        writer.WriteElementString(providerKey + "Id", providerId);
+                        await writer.WriteElementStringAsync(null, providerKey + "Id", null, providerId).ConfigureAwait(false);
                     }
                 }
             }
 
             if (!string.IsNullOrWhiteSpace(item.Tagline))
             {
-                writer.WriteStartElement("Taglines");
-                writer.WriteElementString("Tagline", item.Tagline);
-                writer.WriteEndElement();
+                await writer.WriteStartElementAsync(null, "Taglines", null).ConfigureAwait(false);
+                await writer.WriteElementStringAsync(null, "Tagline", null, item.Tagline).ConfigureAwait(false);
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item.Genres.Length > 0)
             {
-                writer.WriteStartElement("Genres");
+                await writer.WriteStartElementAsync(null, "Genres", null).ConfigureAwait(false);
 
                 foreach (var genre in item.Genres)
                 {
-                    writer.WriteElementString("Genre", genre);
+                    await writer.WriteElementStringAsync(null, "Genre", null, genre).ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item.Studios.Length > 0)
             {
-                writer.WriteStartElement("Studios");
+                await writer.WriteStartElementAsync(null, "Studios", null).ConfigureAwait(false);
 
                 foreach (var studio in item.Studios)
                 {
-                    writer.WriteElementString("Studio", studio);
+                    await writer.WriteElementStringAsync(null, "Studio", null, studio).ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item.Tags.Length > 0)
             {
-                writer.WriteStartElement("Tags");
+                await writer.WriteStartElementAsync(null, "Tags", null).ConfigureAwait(false);
 
                 foreach (var tag in item.Tags)
                 {
-                    writer.WriteElementString("Tag", tag);
+                    await writer.WriteElementStringAsync(null, "Tag", null, tag).ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
-            var people = libraryManager.GetPeople(item);
+            var people = LibraryManager.GetPeople(item);
 
             if (people.Count > 0)
             {
-                writer.WriteStartElement("Persons");
+                await writer.WriteStartElementAsync(null, "Persons", null).ConfigureAwait(false);
 
                 foreach (var person in people)
                 {
-                    writer.WriteStartElement("Person");
-                    writer.WriteElementString("Name", person.Name);
-                    writer.WriteElementString("Type", person.Type);
-                    writer.WriteElementString("Role", person.Role);
+                    await writer.WriteStartElementAsync(null, "Person", null).ConfigureAwait(false);
+                    await writer.WriteElementStringAsync(null, "Name", null, person.Name).ConfigureAwait(false);
+                    await writer.WriteElementStringAsync(null, "Type", null, person.Type.ToString()).ConfigureAwait(false);
+                    await writer.WriteElementStringAsync(null, "Role", null, person.Role).ConfigureAwait(false);
 
                     if (person.SortOrder.HasValue)
                     {
-                        writer.WriteElementString("SortOrder", person.SortOrder.Value.ToString(_usCulture));
+                        await writer.WriteElementStringAsync(null, "SortOrder", null, person.SortOrder.Value.ToString(CultureInfo.InvariantCulture)).ConfigureAwait(false);
                     }
 
-                    writer.WriteEndElement();
+                    await writer.WriteEndElementAsync().ConfigureAwait(false);
                 }
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
             if (item is BoxSet boxset)
             {
-                AddLinkedChildren(boxset, writer, "CollectionItems", "CollectionItem");
+                await AddLinkedChildren(boxset, writer, "CollectionItems", "CollectionItem").ConfigureAwait(false);
             }
 
             if (item is Playlist playlist && !Playlist.IsPlaylistFile(playlist.Path))
             {
-                AddLinkedChildren(playlist, writer, "PlaylistItems", "PlaylistItem");
+                await writer.WriteElementStringAsync(null, "OwnerUserId", null, playlist.OwnerUserId.ToString("N")).ConfigureAwait(false);
+                await AddLinkedChildren(playlist, writer, "PlaylistItems", "PlaylistItem").ConfigureAwait(false);
             }
 
             if (item is IHasShares hasShares)
             {
-                AddShares(hasShares, writer);
+                await AddSharesAsync(hasShares, writer).ConfigureAwait(false);
             }
 
-            AddMediaInfo(item, writer);
+            await AddMediaInfo(item, writer).ConfigureAwait(false);
         }
 
         /// <summary>
@@ -441,23 +414,26 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// </summary>
         /// <param name="item">The item.</param>
         /// <param name="writer">The xml writer.</param>
-        public static void AddShares(IHasShares item, XmlWriter writer)
+        /// <returns>The task object representing the asynchronous operation.</returns>
+        private static async Task AddSharesAsync(IHasShares item, XmlWriter writer)
         {
-            writer.WriteStartElement("Shares");
+            await writer.WriteStartElementAsync(null, "Shares", null).ConfigureAwait(false);
 
             foreach (var share in item.Shares)
             {
-                writer.WriteStartElement("Share");
+                await writer.WriteStartElementAsync(null, "Share", null).ConfigureAwait(false);
 
-                writer.WriteElementString("UserId", share.UserId);
-                writer.WriteElementString(
+                await writer.WriteElementStringAsync(null, "UserId", null, share.UserId.ToString()).ConfigureAwait(false);
+                await writer.WriteElementStringAsync(
+                    null,
                     "CanEdit",
-                    share.CanEdit.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
+                    null,
+                    share.CanEdit.ToString(CultureInfo.InvariantCulture).ToLowerInvariant()).ConfigureAwait(false);
 
-                writer.WriteEndElement();
+                await writer.WriteEndElementAsync().ConfigureAwait(false);
             }
 
-            writer.WriteEndElement();
+            await writer.WriteEndElementAsync().ConfigureAwait(false);
         }
 
         /// <summary>
@@ -466,75 +442,94 @@ namespace MediaBrowser.LocalMetadata.Savers
         /// <param name="item">The item.</param>
         /// <param name="writer">The xml writer.</param>
         /// <typeparam name="T">Type of item.</typeparam>
-        public static void AddMediaInfo<T>(T item, XmlWriter writer)
+        /// <returns>The task object representing the asynchronous operation.</returns>
+        private static Task AddMediaInfo<T>(T item, XmlWriter writer)
             where T : BaseItem
         {
-            if (item is Video video)
+            if (item is Video video && video.Video3DFormat.HasValue)
             {
-                if (video.Video3DFormat.HasValue)
+                return video.Video3DFormat switch
                 {
-                    switch (video.Video3DFormat.Value)
-                    {
-                        case Video3DFormat.FullSideBySide:
-                            writer.WriteElementString("Format3D", "FSBS");
-                            break;
-                        case Video3DFormat.FullTopAndBottom:
-                            writer.WriteElementString("Format3D", "FTAB");
-                            break;
-                        case Video3DFormat.HalfSideBySide:
-                            writer.WriteElementString("Format3D", "HSBS");
-                            break;
-                        case Video3DFormat.HalfTopAndBottom:
-                            writer.WriteElementString("Format3D", "HTAB");
-                            break;
-                        case Video3DFormat.MVC:
-                            writer.WriteElementString("Format3D", "MVC");
-                            break;
-                    }
-                }
+                    Video3DFormat.FullSideBySide =>
+                        writer.WriteElementStringAsync(null, "Format3D", null, "FSBS"),
+                    Video3DFormat.FullTopAndBottom =>
+                        writer.WriteElementStringAsync(null, "Format3D", null, "FTAB"),
+                    Video3DFormat.HalfSideBySide =>
+                        writer.WriteElementStringAsync(null, "Format3D", null, "HSBS"),
+                    Video3DFormat.HalfTopAndBottom =>
+                        writer.WriteElementStringAsync(null, "Format3D", null, "HTAB"),
+                    Video3DFormat.MVC =>
+                        writer.WriteElementStringAsync(null, "Format3D", null, "MVC"),
+                    _ => Task.CompletedTask
+                };
             }
+
+            return Task.CompletedTask;
         }
 
         /// <summary>
-        /// ADd linked children.
+        /// Add linked children.
         /// </summary>
         /// <param name="item">The item.</param>
         /// <param name="writer">The xml writer.</param>
         /// <param name="pluralNodeName">The plural node name.</param>
         /// <param name="singularNodeName">The singular node name.</param>
-        public static void AddLinkedChildren(Folder item, XmlWriter writer, string pluralNodeName, string singularNodeName)
+        /// <returns>The task object representing the asynchronous operation.</returns>
+        private async Task AddLinkedChildren(Folder item, XmlWriter writer, string pluralNodeName, string singularNodeName)
         {
-            var items = item.LinkedChildren
+            var linkedChildren = item.LinkedChildren
                 .Where(i => i.Type == LinkedChildType.Manual)
                 .ToList();
 
-            if (items.Count == 0)
+            if (linkedChildren.Count == 0)
             {
                 return;
             }
 
-            writer.WriteStartElement(pluralNodeName);
-
-            foreach (var link in items)
+            // Batch-resolve all ItemIds to paths in a single query to avoid an N+1 round-trip per linked child
+            var idsToResolve = new HashSet<Guid>();
+            foreach (var link in linkedChildren)
             {
-                if (!string.IsNullOrWhiteSpace(link.Path) || !string.IsNullOrWhiteSpace(link.LibraryItemId))
+                if (link.ItemId.HasValue && !link.ItemId.Value.Equals(Guid.Empty))
                 {
-                    writer.WriteStartElement(singularNodeName);
-                    if (!string.IsNullOrWhiteSpace(link.Path))
-                    {
-                        writer.WriteElementString("Path", link.Path);
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(link.LibraryItemId))
-                    {
-                        writer.WriteElementString("ItemId", link.LibraryItemId);
-                    }
-
-                    writer.WriteEndElement();
+                    idsToResolve.Add(link.ItemId.Value);
                 }
             }
 
-            writer.WriteEndElement();
+            Dictionary<Guid, string?>? pathById = null;
+            if (idsToResolve.Count > 0)
+            {
+                var batched = LibraryManager.GetItemList(new InternalItemsQuery
+                {
+                    ItemIds = [.. idsToResolve],
+                    DtoOptions = DtoOptions.StoredColumnsOnly
+                });
+                pathById = new Dictionary<Guid, string?>(batched.Count);
+                foreach (var batchedItem in batched)
+                {
+                    pathById[batchedItem.Id] = batchedItem.Path;
+                }
+            }
+
+            await writer.WriteStartElementAsync(null, pluralNodeName, null).ConfigureAwait(false);
+
+            foreach (var link in linkedChildren)
+            {
+                string? path = null;
+                if (pathById is not null && link.ItemId.HasValue && pathById.TryGetValue(link.ItemId.Value, out var resolvedPath))
+                {
+                    path = resolvedPath;
+                }
+
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    await writer.WriteStartElementAsync(null, singularNodeName, null).ConfigureAwait(false);
+                    await writer.WriteElementStringAsync(null, "Path", null, path).ConfigureAwait(false);
+                    await writer.WriteEndElementAsync().ConfigureAwait(false);
+                }
+            }
+
+            await writer.WriteEndElementAsync().ConfigureAwait(false);
         }
     }
 }

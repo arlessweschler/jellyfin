@@ -50,6 +50,11 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
         /// </summary>
         private GroupStateType InitialState { get; set; }
 
+        /// <summary>
+        /// Gets or sets a value indicating whether the group position moved during this wait.
+        /// </summary>
+        private bool PositionJumped { get; set; }
+
         /// <inheritdoc />
         public override void SessionJoined(IGroupStateContext context, GroupStateType prevState, SessionInfo session, CancellationToken cancellationToken)
         {
@@ -78,7 +83,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
 
             // Prepare new session.
             var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.NewPlaylist);
-            var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+            var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
             context.SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, update, cancellationToken);
 
             context.SetBuffering(session, true);
@@ -136,12 +141,14 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             ResumePlaying = true;
 
             var setQueueStatus = context.SetPlayQueue(request.PlayingQueue, request.PlayingItemPosition, request.StartPositionTicks);
+            PositionJumped = setQueueStatus;
             if (!setQueueStatus)
             {
                 _logger.LogError("Unable to set playing queue in group {GroupId}.", context.GroupId.ToString());
 
                 // Ignore request and return to previous state.
-                IGroupState newState = prevState switch {
+                IGroupState newState = prevState switch
+                {
                     GroupStateType.Playing => new PlayingGroupState(LoggerFactory),
                     GroupStateType.Paused => new PausedGroupState(LoggerFactory),
                     _ => new IdleGroupState(LoggerFactory)
@@ -152,7 +159,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             }
 
             var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.NewPlaylist);
-            var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+            var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
             context.SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
 
             // Reset status of sessions and await for all Ready events.
@@ -174,10 +181,11 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             ResumePlaying = true;
 
             var result = context.SetPlayingItem(request.PlaylistItemId);
+            PositionJumped = result;
             if (result)
             {
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.SetCurrentItem);
-                var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
 
                 // Reset status of sessions and await for all Ready events.
@@ -213,9 +221,10 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             {
                 ResumePlaying = true;
                 context.RestartCurrentItem();
+                PositionJumped = true;
 
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.NewPlaylist);
-                var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
 
                 // Reset status of sessions and await for all Ready events.
@@ -309,6 +318,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             // Seek.
             context.PositionTicks = ticks;
             context.LastActivity = DateTime.UtcNow;
+            PositionJumped = true;
 
             var command = context.NewSyncPlayCommand(SendCommandType.Seek);
             context.SendCommand(session, SyncPlayBroadcastType.AllGroup, command, cancellationToken);
@@ -336,7 +346,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
                 _logger.LogDebug("Session {SessionId} reported wrong playlist item in group {GroupId}.", session.Id, context.GroupId.ToString());
 
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.SetCurrentItem);
-                var updateSession = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var updateSession = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, updateSession, cancellationToken);
                 context.SetBuffering(session, true);
 
@@ -410,7 +420,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
                 _logger.LogDebug("Session {SessionId} reported wrong playlist item in group {GroupId}.", session.Id, context.GroupId.ToString());
 
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.SetCurrentItem);
-                var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.CurrentSession, update, cancellationToken);
                 context.SetBuffering(session, true);
 
@@ -449,7 +459,13 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             {
                 // Handle case where session reported as ready but in reality
                 // it has no clue of the real position nor the playback state.
-                if (!request.IsPlaying && Math.Abs(delayTicks) > maxPlaybackOffsetTicks)
+                // A jump means the session has not applied the new position; without one it is
+                // catching up after buffering and is allowed to lag.
+                var maxOffsetTicks = request.IsPlaying && !PositionJumped
+                    ? TimeSpan.FromMilliseconds(context.MaxCatchUpOffset).Ticks
+                    : maxPlaybackOffsetTicks;
+
+                if (Math.Abs(delayTicks) > maxOffsetTicks)
                 {
                     // Session not ready at all.
                     context.SetBuffering(session, true);
@@ -500,7 +516,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
                     {
                         // Client, that was buffering, resumed playback but did not update others in time.
                         delayTicks = context.GetHighestPing() * 2 * TimeSpan.TicksPerMillisecond;
-                        delayTicks = Math.Max(delayTicks, context.DefaultPing);
+                        delayTicks = Math.Max(delayTicks, TimeSpan.FromMilliseconds(context.DefaultPing).Ticks);
 
                         context.LastActivity = currentTime.AddTicks(delayTicks);
 
@@ -533,11 +549,9 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
                     _logger.LogWarning("Session {SessionId} is seeking to wrong position, correcting.", session.Id);
                     return;
                 }
-                else
-                {
-                    // Session is ready.
-                    context.SetBuffering(session, false);
-                }
+
+                // Session is ready.
+                context.SetBuffering(session, false);
 
                 if (!context.IsBuffering())
                 {
@@ -549,7 +563,7 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
 
                     if (InitialState.Equals(GroupStateType.Playing))
                     {
-                        // Group went from playing to waiting state and a pause request occured while waiting.
+                        // Group went from playing to waiting state and a pause request occurred while waiting.
                         var pauseRequest = new PauseGroupRequest();
                         pausedState.HandleRequest(pauseRequest, context, Type, session, cancellationToken);
                     }
@@ -581,11 +595,12 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             }
 
             var newItem = context.NextItemInQueue();
+            PositionJumped = newItem;
             if (newItem)
             {
                 // Send playing-queue update.
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.NextItem);
-                var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
 
                 // Reset status of sessions and await for all Ready events.
@@ -627,11 +642,12 @@ namespace MediaBrowser.Controller.SyncPlay.GroupStates
             }
 
             var newItem = context.PreviousItemInQueue();
+            PositionJumped = newItem;
             if (newItem)
             {
                 // Send playing-queue update.
                 var playQueueUpdate = context.GetPlayQueueUpdate(PlayQueueUpdateReason.PreviousItem);
-                var update = context.NewSyncPlayGroupUpdate(GroupUpdateType.PlayQueue, playQueueUpdate);
+                var update = new SyncPlayPlayQueueUpdate(context.GroupId, playQueueUpdate);
                 context.SendGroupUpdate(session, SyncPlayBroadcastType.AllGroup, update, cancellationToken);
 
                 // Reset status of sessions and await for all Ready events.
